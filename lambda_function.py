@@ -127,7 +127,10 @@ def fmt(val):
     if val is None or val == "":
         return ""
     try:
-        return str(float(val))
+        f = float(str(val).replace(",", "."))
+        if f == int(f):
+            return f"{int(f):,}"
+        return f"{f:,.2f}"
     except Exception:
         return str(val)
 
