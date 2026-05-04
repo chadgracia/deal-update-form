@@ -586,9 +586,38 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     if old_stage != new_stage_name:
         change_lines.append(f"  Stage: {old_stage} → {new_stage_name}")
 
+    # Fetch contact email and phone
+    contact_id = (current_deal.get("primary_contact") or {}).get("id", 0)
+    contact_email = ""
+    contact_phone = ""
+    if contact_id:
+        p = call_pipeline_api("GET", f"/people/{contact_id}.json", jwt=jwt)
+        if p["status"] == 200:
+            contact_email = p["data"].get("email") or ""
+            contact_phone = p["data"].get("phone") or p["data"].get("mobile") or ""
+
+    # Resolve current deal values (post-update snapshot uses submitted values where provided)
+    current_gross = gross_val or fmt(parse_cf(current_cf, GROSS_FIELD))
+    current_net   = net_val   or fmt(parse_cf(current_cf, NET_FIELD))
+    current_min   = min_val   or fmt(parse_cf(current_cf, MIN_SIZE_FIELD))
+    current_max   = max_val   or fmt(parse_cf(current_cf, MAX_SIZE_FIELD))
+    current_fee   = mgmt_fee_val or fmt(parse_cf(current_cf, MGMT_FEE_FIELD))
+    current_carry = carry_val or fmt(parse_cf(current_cf, CARRY_FIELD))
+
     lines = [
         f"Deal update from {contact_name} ({company})",
-        f"Pipeline: https://app.pipelinecrm.com/deals/{deal_id}",
+        f"Deal:    https://app.pipelinecrm.com/deals/{deal_id}",
+        f"Contact: {contact_email or '—'} | {contact_phone or '—'}",
+        f"         https://app.pipelinecrm.com/people/{contact_id}",
+        "",
+        "── Deal snapshot ──",
+        f"  Gross:    {current_gross or '—'}",
+        f"  Net:      {current_net or '—'}",
+        f"  Min size: {current_min or '—'}",
+        f"  Max size: {current_max or '—'}",
+        f"  Mgmt fee: {current_fee or '—'}",
+        f"  Carry:    {current_carry or '—'}",
+        f"  Stage:    {new_stage_name}",
         "",
     ]
     if change_lines:
