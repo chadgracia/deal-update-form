@@ -621,83 +621,73 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         )
         return error_page("We couldn't save your update right now. Chad has been notified.")
 
-    # Build old vs new summary for Chad
-    field_map = [
-        (net_val,      NET_FIELD,       "Net price"),
-        (gross_val,    GROSS_FIELD,     "Gross price"),
-        (min_val,      MIN_SIZE_FIELD,  "Min size"),
-        (max_val,      MAX_SIZE_FIELD,  "Max size"),
-        (mgmt_fee_val, MGMT_FEE_FIELD,  "Mgmt fee"),
-        (carry_val,    CARRY_FIELD,     "Carry"),
-    ]
-
-    change_lines    = []
-    unchanged_lines = []
-    for new_v, field, label in field_map:
-        if not new_v:
-            continue
-        old_v = fmt(parse_cf(current_cf, field))
-        if new_v != old_v:
-            change_lines.append(f"  {label}: {old_v or '—'} → {new_v}")
-        else:
-            unchanged_lines.append(f"  {label}: {new_v} (no change)")
-
-    if old_stage != new_stage_name:
-        change_lines.append(f"  Stage: {old_stage} → {new_stage_name}")
-
-    # Fetch contact email and phone
+    # Fetch contact email
     contact_id = (current_deal.get("primary_contact") or {}).get("id", 0)
     contact_email = ""
-    contact_phone = ""
     if contact_id:
         p = call_pipeline_api("GET", f"/people/{contact_id}.json", jwt=jwt)
         if p["status"] == 200:
             contact_email = p["data"].get("email") or ""
-            contact_phone = p["data"].get("phone") or p["data"].get("mobile") or ""
 
-    # Resolve current deal values (post-update snapshot uses submitted values where provided)
-    current_gross = gross_val or fmt(parse_cf(current_cf, GROSS_FIELD))
-    current_net   = net_val   or fmt(parse_cf(current_cf, NET_FIELD))
-    current_min   = min_val   or fmt(parse_cf(current_cf, MIN_SIZE_FIELD))
-    current_max   = max_val   or fmt(parse_cf(current_cf, MAX_SIZE_FIELD))
-    current_fee   = mgmt_fee_val or fmt(parse_cf(current_cf, MGMT_FEE_FIELD))
-    current_carry = carry_val or fmt(parse_cf(current_cf, CARRY_FIELD))
+    def fmt_email(val):
+        if val is None or val == "":
+            return "—"
+        try:
+            f = float(str(val).replace(",", "."))
+            if f == int(f):
+                return f"${int(f):,}"
+            return f"${f:,.2f}"
+        except Exception:
+            return str(val)
 
-    lines = [
-        f"Deal update from {contact_name} ({company})",
-        f"Deal:    https://app.pipelinecrm.com/deals/{deal_id}",
-        f"Contact: {contact_email or '—'} | {contact_phone or '—'}",
-        f"         https://app.pipelinecrm.com/people/{contact_id}",
-        "",
-        "── Deal snapshot ──",
-        f"  Gross:    {current_gross or '—'}",
-        f"  Net:      {current_net or '—'}",
-        f"  Min size: {current_min or '—'}",
-        f"  Max size: {current_max or '—'}",
-        f"  Mgmt fee: {current_fee or '—'}",
-        f"  Carry:    {current_carry or '—'}",
-        f"  Stage:    {new_stage_name}",
-        "",
-    ]
-    if change_lines:
-        lines.append("Changed:")
-        lines.extend(change_lines)
+    side = "Sell" if is_sell(current_cf) else "Buy"
+    deal_name = current_deal.get("name", f"{side} Order: {company}")
+
+    # For sell side use net, for buy side use gross
+    if side == "Sell":
+        price_label = "Net price"
+        price_old = fmt_email(parse_cf(current_cf, NET_FIELD))
+        price_new = fmt_email(net_val or parse_cf(current_cf, NET_FIELD))
     else:
-        lines.append("No changes — order re-confirmed as-is.")
-    if unchanged_lines:
-        lines.append("")
-        lines.append("Unchanged:")
-        lines.extend(unchanged_lines)
+        price_label = "Gross price"
+        price_old = fmt_email(parse_cf(current_cf, GROSS_FIELD))
+        price_new = fmt_email(gross_val or parse_cf(current_cf, GROSS_FIELD))
+
+    rows = [
+        (price_label,  price_old,   price_new),
+        ("Min size",   fmt_email(parse_cf(current_cf, MIN_SIZE_FIELD)), fmt_email(min_val or parse_cf(current_cf, MIN_SIZE_FIELD))),
+        ("Max size",   fmt_email(parse_cf(current_cf, MAX_SIZE_FIELD)), fmt_email(max_val or parse_cf(current_cf, MAX_SIZE_FIELD))),
+        ("Mgmt fee",   fmt_email(parse_cf(current_cf, MGMT_FEE_FIELD)), fmt_email(mgmt_fee_val or parse_cf(current_cf, MGMT_FEE_FIELD))),
+        ("Carry",      fmt_email(parse_cf(current_cf, CARRY_FIELD)),    fmt_email(carry_val or parse_cf(current_cf, CARRY_FIELD))),
+        ("Stage",      old_stage, new_stage_name),
+    ]
+
+    col1 = max(len(r[0]) for r in rows)
+    col2 = max(len(r[1]) for r in rows)
+
+    header = f"{'Field':<{col1}}  {'Before':<{col2}}  After"
+    divider = "─" * (col1 + col2 + 20)
+    table_lines = [header, divider]
+    for label, old_v, new_v in rows:
+        changed = " ✓" if old_v != new_v else ""
+        table_lines.append(f"{label:<{col1}}  {old_v:<{col2}}  {new_v}{changed}")
+
+    email_lines = [
+        deal_name,
+        f"{contact_name} — {contact_email or '—'}",
+        f"Deal: https://app.pipelinecrm.com/deals/{deal_id}",
+        f"Lead: https://app.pipelinecrm.com/people/{contact_id}",
+        "",
+        *table_lines,
+    ]
     if comments:
-        lines.append("")
-        lines.append(f"Client note: {comments}")
-    lines.append("")
-    lines.append("Refresh reset to 60 days.")
+        email_lines += ["", f"Client note: {comments}"]
+    email_lines += ["", "Refresh reset to 60 days."]
 
     send_email(
         CHAD_EMAIL,
-        f"Deal update: {contact_name} — {company} (#{deal_id})",
-        "\n".join(lines)
+        f"{deal_name} — {contact_name} (#{deal_id})",
+        "\n".join(email_lines)
     )
 
     return success_page("Update received!")
