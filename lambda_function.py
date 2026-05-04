@@ -47,6 +47,11 @@ DEAL_TYPE_FIELD   = "custom_label_1958"
 STRUCTURE_FIELD   = "custom_label_3064360"
 COMPANY_PPS_FIELD = "custom_label_3064363"
 COMPANY_VAL_FIELD = "custom_label_3790429"
+HIIVE_ASK_FIELD  = "custom_label_3997297"
+HIIVE_BID_FIELD  = "custom_label_3997298"
+HIIVE_ASK_DATE_FIELD = "custom_label_3997299"
+HIIVE_BID_DATE_FIELD = "custom_label_3997300"
+DIRECT_STRUCTURE_ID  = 6250090
 SELL_TYPE_ID      = 5011675
 
 OBSOLETE_STAGE_ID = 2348038
@@ -278,6 +283,27 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str) -> dict:
             if isinstance(structure_raw, list):
                 is_spv = SPV_STRUCTURE_ID in [int(x) for x in structure_raw if x]
 
+    # Detect Direct structure
+    is_direct = False
+    if structure_raw is not None:
+        try:
+            is_direct = int(float(str(structure_raw))) == DIRECT_STRUCTURE_ID
+        except (ValueError, TypeError):
+            if isinstance(structure_raw, list):
+                is_direct = DIRECT_STRUCTURE_ID in [int(x) for x in structure_raw if x]
+
+    # Read Hiive prices from company record
+    hiive_bid = None
+    hiive_ask = None
+    hiive_bid_date = None
+    hiive_ask_date = None
+    if company_rec and is_direct:
+        ccf = company_rec.get("custom_fields", {})
+        hiive_bid = parse_cf(ccf, HIIVE_BID_FIELD)
+        hiive_ask = parse_cf(ccf, HIIVE_ASK_FIELD)
+        hiive_bid_date = parse_cf(ccf, HIIVE_BID_DATE_FIELD)
+        hiive_ask_date = parse_cf(ccf, HIIVE_ASK_DATE_FIELD)
+
     if sell:
         price_label   = "Net Price (your take-home after commission)"
         price_tooltip = "Net = the amount you receive after our commission is deducted."
@@ -335,6 +361,36 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str) -> dict:
         </div>
       </div>'''
 
+    # Build Hiive match button
+    hiive_btn_html = ""
+    if is_direct:
+        if sell and hiive_bid:
+            try:
+                hiive_price = float(str(hiive_bid).replace(",", "."))
+                date_str = f" ({hiive_bid_date})" if hiive_bid_date else ""
+                hiive_btn_html = f"""
+        <button type="submit" name="submit_action" value="confirm"
+          onclick="document.querySelector('[name={price_field}]').value='{hiive_price}'"
+          style="width:100%;margin-bottom:10px;background:#e8f4e8;color:#2a6a2a;border:1px solid #a8d4a8;
+                 border-radius:8px;padding:11px;font-size:14px;font-weight:600;cursor:pointer;">
+          ⚡ Match Best Bid: ${hiive_price:,.2f}/share{date_str}
+        </button>"""
+            except (ValueError, TypeError):
+                pass
+        elif not sell and hiive_ask:
+            try:
+                hiive_price = float(str(hiive_ask).replace(",", "."))
+                date_str = f" ({hiive_ask_date})" if hiive_ask_date else ""
+                hiive_btn_html = f"""
+        <button type="submit" name="submit_action" value="confirm"
+          onclick="document.querySelector('[name={price_field}]').value='{hiive_price}'"
+          style="width:100%;margin-bottom:10px;background:#e8f4e8;color:#2a6a2a;border:1px solid #a8d4a8;
+                 border-radius:8px;padding:11px;font-size:14px;font-weight:600;cursor:pointer;">
+          ⚡ Match Best Ask: ${hiive_price:,.2f}/share{date_str}
+        </button>"""
+            except (ValueError, TypeError):
+                pass
+
     form_html = f"""
     <h1>{side} Order: {company}</h1>
     <p class="subtitle">Hello{f" {contact_name.split()[0]}" if contact_name else ""}! Please review and update your deal details below.</p>
@@ -365,6 +421,8 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str) -> dict:
       </div>
 
       {spv_fields_html}
+
+      {hiive_btn_html}
 
       <div class="btn-row">
         <button type="submit" name="submit_action" value="confirm" class="btn-primary">✓ Confirm / Update</button>
