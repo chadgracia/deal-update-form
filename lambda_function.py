@@ -124,10 +124,27 @@ def is_sell(cf) -> bool:
 
 
 def fmt(val):
+    """For display only — formats with thousand separators."""
     if val is None or val == "":
         return ""
     try:
-        return str(float(val))
+        f = float(str(val).replace(",", "."))
+        if f == int(f):
+            return f"{int(f):,}"
+        return f"{f:,.2f}"
+    except Exception:
+        return str(val)
+
+
+def fmt_input(val):
+    """For pre-filling numeric input fields — no thousand separators."""
+    if val is None or val == "":
+        return ""
+    try:
+        f = float(str(val).replace(",", "."))
+        if f == int(f):
+            return str(int(f))
+        return f"{f:.2f}"
     except Exception:
         return str(val)
 
@@ -265,12 +282,12 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str) -> dict:
     contact      = deal.get("primary_contact") or {}
     contact_name = contact.get("full_name", "")
 
-    gross_val    = fmt(parse_cf(cf, GROSS_FIELD))
-    net_val      = fmt(parse_cf(cf, NET_FIELD))
-    min_val      = fmt(parse_cf(cf, MIN_SIZE_FIELD))
-    max_val      = fmt(parse_cf(cf, MAX_SIZE_FIELD))
-    mgmt_fee_val = fmt(parse_cf(cf, MGMT_FEE_FIELD))
-    carry_val    = fmt(parse_cf(cf, CARRY_FIELD))
+    gross_val    = fmt_input(parse_cf(cf, GROSS_FIELD))
+    net_val      = fmt_input(parse_cf(cf, NET_FIELD))
+    min_val      = fmt_input(parse_cf(cf, MIN_SIZE_FIELD))
+    max_val      = fmt_input(parse_cf(cf, MAX_SIZE_FIELD))
+    mgmt_fee_val = fmt_input(parse_cf(cf, MGMT_FEE_FIELD))
+    carry_val    = fmt_input(parse_cf(cf, CARRY_FIELD))
 
     # Detect SPV structure
     structure_raw = parse_cf(cf, STRUCTURE_FIELD)
