@@ -308,15 +308,8 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str) -> dict:
                 pass
         if lr_val:
             try:
-                val_f = float(lr_val)  # stored in whole dollars
-                if val_f >= 1_000_000_000_000:
-                    val_str = f"${val_f/1_000_000_000_000:,.2f}T"
-                elif val_f >= 1_000_000_000:
-                    val_str = f"${val_f/1_000_000_000:,.1f}B"
-                elif val_f >= 1_000_000:
-                    val_str = f"${val_f/1_000_000:,.1f}M"
-                else:
-                    val_str = f"${val_f:,.0f}"
+                val_f = float(lr_val)  # stored in billions decimal (e.g. 7.6 = $7.6B)
+                val_str = f"${val_f:.1f}B"
                 rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0"><span style="color:#888">Last round valuation</span><span style="font-weight:500">{val_str}</span></div>')
             except (ValueError, TypeError):
                 pass
