@@ -384,26 +384,24 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str) -> dict:
         if sell and hiive_bid:
             try:
                 hiive_price = float(str(hiive_bid).replace(",", "."))
-                date_str = f" ({hiive_bid_date})" if hiive_bid_date else ""
                 hiive_btn_html = f"""
         <button type="submit" name="submit_action" value="confirm"
           onclick="document.querySelector('[name={price_field}]').value='{hiive_price}'"
           style="width:100%;margin-bottom:10px;background:#e8f4e8;color:#2a6a2a;border:1px solid #a8d4a8;
                  border-radius:8px;padding:11px;font-size:14px;font-weight:600;cursor:pointer;">
-          ⚡ Match Best Bid: ${hiive_price:,.2f}/share{date_str}
+          ⚡ Match Best Bid: ${hiive_price:,.2f}/share (before commission)
         </button>"""
             except (ValueError, TypeError):
                 pass
         elif not sell and hiive_ask:
             try:
                 hiive_price = float(str(hiive_ask).replace(",", "."))
-                date_str = f" ({hiive_ask_date})" if hiive_ask_date else ""
                 hiive_btn_html = f"""
         <button type="submit" name="submit_action" value="confirm"
           onclick="document.querySelector('[name={price_field}]').value='{hiive_price}'"
           style="width:100%;margin-bottom:10px;background:#e8f4e8;color:#2a6a2a;border:1px solid #a8d4a8;
                  border-radius:8px;padding:11px;font-size:14px;font-weight:600;cursor:pointer;">
-          ⚡ Match Best Ask: ${hiive_price:,.2f}/share{date_str}
+          ⚡ Match Best Ask: ${hiive_price:,.2f}/share (before commission)
         </button>"""
             except (ValueError, TypeError):
                 pass
@@ -422,15 +420,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str) -> dict:
         <input type="number" name="{price_field}" value="{price_current}" step="any" placeholder="e.g. 45.50">
       </div>
 
-      <div class="field">
-        <label>Minimum Size ($)</label>
-        <input type="text" name="min_size" value="{fmt(parse_cf(cf, MIN_SIZE_FIELD))}" placeholder="e.g. 100,000">
-      </div>
-
-      <div class="field">
-        <label>Maximum Size ($)</label>
-        <input type="text" name="max_size" value="{fmt(parse_cf(cf, MAX_SIZE_FIELD))}" placeholder="e.g. 500,000">
-      </div>
+      {hiive_btn_html}
 
       <div class="field">
         <label>Comments (optional)</label>
@@ -438,8 +428,6 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str) -> dict:
       </div>
 
       {spv_fields_html}
-
-      {hiive_btn_html}
 
       <div class="btn-row">
         <button type="submit" name="submit_action" value="confirm" class="btn-primary">✓ Confirm / Update</button>
@@ -450,6 +438,9 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str) -> dict:
     <div class="unsub">
       <a href="{unsub_url}">Unsubscribe from deal update reminders</a>
     </div>
+    <p style="text-align:center;font-size:11px;color:#bbb;margin-top:16px;">
+      Reference only. Not an offer to buy or sell securities.
+    </p>
     """
     return html_response(form_html)
 
