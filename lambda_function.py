@@ -424,12 +424,12 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str) -> dict:
 
       <div class="field">
         <label>Minimum Size ($)</label>
-        <input type="number" name="min_size" value="{min_val}" step="1" placeholder="e.g. 100000">
+        <input type="text" name="min_size" value="{fmt(parse_cf(cf, MIN_SIZE_FIELD))}" placeholder="e.g. 100,000">
       </div>
 
       <div class="field">
         <label>Maximum Size ($)</label>
-        <input type="number" name="max_size" value="{max_val}" step="1" placeholder="e.g. 500000">
+        <input type="text" name="max_size" value="{fmt(parse_cf(cf, MAX_SIZE_FIELD))}" placeholder="e.g. 500,000">
       </div>
 
       <div class="field">
@@ -576,8 +576,8 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     # Extract submitted fields
     gross_val    = params.get("gross", "").strip()
     net_val      = params.get("net", "").strip()
-    min_val      = params.get("min_size", "").strip()
-    max_val      = params.get("max_size", "").strip()
+    min_val      = params.get("min_size", "").strip().replace(",", "")
+    max_val      = params.get("max_size", "").strip().replace(",", "")
     mgmt_fee_val = params.get("mgmt_fee", "").strip()
     carry_val    = params.get("carry", "").strip()
     comments     = params.get("comments", "").strip()
