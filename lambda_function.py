@@ -464,15 +464,34 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str) -> dict:
     except (ValueError, TypeError):
         existing_price = None
 
-    # hiive_opposite: same-side anchor from Hiive (sell→ask, buy→bid)
-    hiive_opposite = None
+    # Hiive anchor: same-side preferred (competing peer prices),
+    # opposite-side fallback (what counterparty offers — could clear at this price).
+    # anchor_verb describes which Hiive field was used, not the user's side.
+    hiive_anchor = None
+    anchor_verb = None
     if is_direct:
-        raw_opp = hiive_ask if sell else hiive_bid
-        try:
-            if raw_opp not in (None, ""):
-                hiive_opposite = float(str(raw_opp).replace(",", "."))
-        except (ValueError, TypeError):
-            hiive_opposite = None
+        if sell:
+            # Sell: prefer competing seller asks; fall back to buyer bids
+            if hiive_ask not in (None, ""):
+                hiive_anchor = hiive_ask
+                anchor_verb = "listing"
+            elif hiive_bid not in (None, ""):
+                hiive_anchor = hiive_bid
+                anchor_verb = "bidding"
+        else:
+            # Buy: prefer competing buyer bids; fall back to seller asks
+            if hiive_bid not in (None, ""):
+                hiive_anchor = hiive_bid
+                anchor_verb = "bidding"
+            elif hiive_ask not in (None, ""):
+                hiive_anchor = hiive_ask
+                anchor_verb = "listing"
+        if hiive_anchor is not None:
+            try:
+                hiive_anchor = float(str(hiive_anchor).replace(",", "."))
+            except (ValueError, TypeError):
+                hiive_anchor = None
+                anchor_verb = None
 
     # lr_pps: last-round price per share from company record
     lr_pps_val = None
@@ -498,26 +517,36 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str) -> dict:
     popup_heading = ""
     popup_keep = ""
 
-    if existing_price is None and lr_pps_val is not None:
-        popup_variant = 3
-        popup_heading = "Without a price, we can't find a match!"
-        popup_keep = "Submit without price"
-        popup_buttons = [
-            {"price": round(_better(lr_pps_val, 20), 2), "label": "20% better than last round", "color": "light"},
-            {"price": round(_better(lr_pps_val, 10), 2), "label": "10% better than last round", "color": "dark"},
-            {"price": round(lr_pps_val, 2),              "label": "Last round price",           "color": "blue"},
-        ]
-    elif existing_price is None:
-        popup_variant = None
-    elif hiive_opposite is not None and _worse_than(existing_price, hiive_opposite):
+    if existing_price is None:
+        if hiive_anchor is not None:
+            popup_variant = 3
+            popup_heading = "Without a price, we can't find a match!"
+            popup_keep = "Submit without price"
+            popup_top = f"Others are {anchor_verb} at ${hiive_anchor:,.2f}"
+            popup_buttons = [
+                {"price": round(_better(hiive_anchor, 20), 2), "label": "20% better", "color": "light"},
+                {"price": round(_better(hiive_anchor, 10), 2), "label": "10% better", "color": "dark"},
+                {"price": round(hiive_anchor, 2),              "label": "Match",      "color": "blue"},
+            ]
+        elif lr_pps_val is not None:
+            popup_variant = 3
+            popup_heading = "Without a price, we can't find a match!"
+            popup_keep = "Submit without price"
+            popup_buttons = [
+                {"price": round(_better(lr_pps_val, 20), 2), "label": "20% better than last round", "color": "light"},
+                {"price": round(_better(lr_pps_val, 10), 2), "label": "10% better than last round", "color": "dark"},
+                {"price": round(lr_pps_val, 2),              "label": "Last round price",           "color": "blue"},
+            ]
+        else:
+            popup_variant = None
+    elif hiive_anchor is not None and _worse_than(existing_price, hiive_anchor):
         popup_variant = 1
-        verb = "listing" if sell else "bidding"
-        popup_top = f"Others are {verb} at ${hiive_opposite:,.2f}"
+        popup_top = f"Others are {anchor_verb} at ${hiive_anchor:,.2f}"
         popup_heading = "Improve your chances of finding a match:"
         popup_keep = f"Keep ${existing_price:,.2f}"
         popup_buttons = [
-            {"price": round(_better(hiive_opposite, 5), 2), "label": "Best",    "color": "light"},
-            {"price": round(hiive_opposite, 2),             "label": "Match",   "color": "dark"},
+            {"price": round(_better(hiive_anchor, 5), 2),   "label": "Best",    "color": "light"},
+            {"price": round(hiive_anchor, 2),               "label": "Match",   "color": "dark"},
             {"price": round(_better(existing_price, 5), 2), "label": "Improve", "color": "blue"},
         ]
     else:
