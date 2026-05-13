@@ -255,6 +255,83 @@ def html_response(body_html: str, status: int = 200) -> dict:
     .tooltip-icon:hover .tooltip-text {{ display: block; }}
     .success-icon {{ font-size: 48px; text-align: center; margin-bottom: 16px; }}
     .countdown {{ font-size: 13px; color: #999; text-align: center; margin-top: 16px; }}
+    .modal-overlay {{
+      display: none;
+      position: fixed;
+      inset: 0;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.5);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }}
+    .modal-card {{
+      background: #fff;
+      border-radius: 12px;
+      padding: 28px 24px;
+      max-width: 480px;
+      width: 100%;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+    }}
+    .modal-top {{
+      text-align: center;
+      font-size: 14px;
+      color: #555;
+      margin-bottom: 10px;
+    }}
+    .modal-heading {{
+      text-align: center;
+      font-size: 17px;
+      font-weight: 700;
+      color: #1a1a1a;
+      margin-bottom: 20px;
+    }}
+    .modal-btn-row {{
+      display: flex;
+      gap: 10px;
+      margin-bottom: 18px;
+      flex-wrap: wrap;
+    }}
+    .modal-btn {{
+      flex: 1 1 0;
+      min-width: 110px;
+      border: none;
+      border-radius: 10px;
+      padding: 16px 8px;
+      cursor: pointer;
+      text-align: center;
+      font-family: inherit;
+      transition: transform 0.05s, filter 0.15s;
+    }}
+    .modal-btn:hover {{ filter: brightness(0.95); }}
+    .modal-btn:active {{ transform: translateY(1px); }}
+    .modal-btn-price {{ font-size: 20px; font-weight: 700; line-height: 1.1; }}
+    .modal-btn-sub {{ font-size: 12px; margin-top: 4px; opacity: 0.9; }}
+    .modal-btn-light {{ background: #d4edda; color: #155724; }}
+    .modal-btn-dark {{ background: #28a745; color: #fff; }}
+    .modal-btn-blue {{ background: #cfe2ff; color: #084298; }}
+    .modal-links {{
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: center;
+    }}
+    .modal-link {{
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 13px;
+      font-family: inherit;
+      padding: 4px 8px;
+      text-decoration: underline;
+    }}
+    .modal-link-keep {{ color: #d9534f; }}
+    .modal-link-back {{ color: #666; }}
+    @media (max-width: 480px) {{
+      .modal-btn-row {{ flex-direction: column; }}
+      .modal-btn {{ width: 100%; }}
+    }}
   </style>
 </head>
 <body>
@@ -378,6 +455,162 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str) -> dict:
         </div>
       </div>'''
 
+    # ── Pricing-nudge popup state (computed server-side) ─────────────
+    # existing_price: current net (sell) or gross (buy), as float or None
+    existing_price = None
+    try:
+        if price_current not in (None, ""):
+            existing_price = float(str(price_current).replace(",", "."))
+    except (ValueError, TypeError):
+        existing_price = None
+
+    # hiive_opposite: same-side anchor from Hiive (sell→ask, buy→bid)
+    hiive_opposite = None
+    if is_direct:
+        raw_opp = hiive_ask if sell else hiive_bid
+        try:
+            if raw_opp not in (None, ""):
+                hiive_opposite = float(str(raw_opp).replace(",", "."))
+        except (ValueError, TypeError):
+            hiive_opposite = None
+
+    # lr_pps: last-round price per share from company record
+    lr_pps_val = None
+    if company_rec:
+        try:
+            raw_lr = parse_cf(company_rec.get("custom_fields", {}), COMPANY_PPS_FIELD)
+            if raw_lr not in (None, ""):
+                lr_pps_val = float(str(raw_lr).replace(",", "."))
+        except (ValueError, TypeError):
+            lr_pps_val = None
+
+    def _better(p, pct):
+        # Side-aware "X% better than p"
+        return p * (1 - pct / 100.0) if sell else p * (1 + pct / 100.0)
+
+    def _worse_than(my, opp):
+        # sell: my net > their ask is worse; buy: my gross < their bid is worse
+        return (my > opp) if sell else (my < opp)
+
+    popup_variant = None
+    popup_buttons = []
+    popup_top = ""
+    popup_heading = ""
+    popup_keep = ""
+
+    if existing_price is None and lr_pps_val is not None:
+        popup_variant = 3
+        popup_heading = "Without a price, we can't find a match!"
+        popup_keep = "Submit without price"
+        popup_buttons = [
+            {"price": round(_better(lr_pps_val, 20), 2), "label": "20% better than last round", "color": "light"},
+            {"price": round(_better(lr_pps_val, 10), 2), "label": "10% better than last round", "color": "dark"},
+            {"price": round(lr_pps_val, 2),              "label": "Last round price",           "color": "blue"},
+        ]
+    elif existing_price is None:
+        popup_variant = None
+    elif hiive_opposite is not None and _worse_than(existing_price, hiive_opposite):
+        popup_variant = 1
+        verb = "listing" if sell else "bidding"
+        popup_top = f"Others are {verb} at ${hiive_opposite:,.2f}"
+        popup_heading = "Improve your chances of finding a match:"
+        popup_keep = f"Keep ${existing_price:,.2f}"
+        popup_buttons = [
+            {"price": round(_better(hiive_opposite, 5), 2), "label": "Best",    "color": "light"},
+            {"price": round(hiive_opposite, 2),             "label": "Match",   "color": "dark"},
+            {"price": round(_better(existing_price, 5), 2), "label": "Improve", "color": "blue"},
+        ]
+    else:
+        popup_variant = 2
+        popup_heading = "Improve your chances of finding a match:"
+        popup_keep = f"Keep ${existing_price:,.2f}"
+        popup_buttons = [
+            {"price": round(_better(existing_price, 20), 2), "label": "20% better", "color": "light"},
+            {"price": round(_better(existing_price, 10), 2), "label": "10% better", "color": "dark"},
+            {"price": round(_better(existing_price, 5),  2), "label": "5% better",  "color": "blue"},
+        ]
+
+    modal_html = ""
+    popup_script = ""
+    if popup_variant:
+        btns_html = "".join(
+            f'<button type="button" class="modal-btn modal-btn-{b["color"]}" data-price="{b["price"]:.2f}">'
+            f'<div class="modal-btn-price">${b["price"]:,.2f}</div>'
+            f'<div class="modal-btn-sub">{b["label"]}</div>'
+            f'</button>'
+            for b in popup_buttons
+        )
+        top_html = f'<div class="modal-top">{popup_top}</div>' if popup_top else ""
+        modal_html = f"""
+    <div class="modal-overlay" id="priceModalOverlay" role="dialog" aria-modal="true">
+      <div class="modal-card">
+        {top_html}
+        <div class="modal-heading">{popup_heading}</div>
+        <div class="modal-btn-row">{btns_html}</div>
+        <div class="modal-links">
+          <button type="button" class="modal-link modal-link-keep" id="modalKeepBtn">{popup_keep}</button>
+          <button type="button" class="modal-link modal-link-back" id="modalBackBtn">Go back and set price manually</button>
+        </div>
+      </div>
+    </div>"""
+
+        popup_script = f"""
+    <script>
+    (function() {{
+      var form = document.querySelector('form');
+      if (!form) return;
+      var priceInput = form.querySelector('[name="{price_field}"]');
+      var initialPrice = priceInput ? priceInput.value : '';
+      var overlay = document.getElementById('priceModalOverlay');
+      if (!overlay) return;
+      var bypass = false;
+
+      function mainConfirmBtn() {{
+        var btns = form.querySelectorAll('button[name="submit_action"][value="confirm"]');
+        // Last confirm button is the main "Confirm / Update" (the Hiive match button, if present, is earlier)
+        return btns[btns.length - 1];
+      }}
+      function submitConfirm() {{
+        bypass = true;
+        var b = mainConfirmBtn();
+        if (b) b.click(); else form.submit();
+      }}
+      function hideModal() {{ overlay.style.display = 'none'; }}
+
+      form.addEventListener('submit', function(e) {{
+        if (bypass) return;
+        var s = e.submitter;
+        if (s && s.value === 'cancel') return;
+        var cur = priceInput ? priceInput.value : '';
+        if (cur === initialPrice) {{
+          e.preventDefault();
+          overlay.style.display = 'flex';
+        }}
+      }});
+
+      overlay.querySelectorAll('.modal-btn').forEach(function(btn) {{
+        btn.addEventListener('click', function() {{
+          if (priceInput) priceInput.value = btn.getAttribute('data-price');
+          hideModal();
+          submitConfirm();
+        }});
+      }});
+
+      var keep = document.getElementById('modalKeepBtn');
+      if (keep) keep.addEventListener('click', function() {{ hideModal(); submitConfirm(); }});
+
+      var back = document.getElementById('modalBackBtn');
+      if (back) back.addEventListener('click', function() {{
+        hideModal();
+        if (priceInput) {{ priceInput.focus(); try {{ priceInput.select(); }} catch (err) {{}} }}
+      }});
+
+      document.addEventListener('keydown', function(e) {{
+        if (e.key === 'Escape' && overlay.style.display === 'flex') hideModal();
+      }});
+    }})();
+    </script>"""
+
     # Build Hiive match button
     hiive_btn_html = ""
     if is_direct:
@@ -441,6 +674,8 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str) -> dict:
     <p style="text-align:center;font-size:11px;color:#bbb;margin-top:16px;">
       Reference only. Not an offer to buy or sell securities.
     </p>
+    {modal_html}
+    {popup_script}
     """
     return html_response(form_html)
 
