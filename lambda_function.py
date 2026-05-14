@@ -328,6 +328,8 @@ def html_response(body_html: str, status: int = 200) -> dict:
     }}
     .modal-link-keep {{ color: #d9534f; }}
     .modal-link-back {{ color: #666; }}
+    .modal-link-lr-row {{ text-align: center; margin-bottom: 14px; }}
+    .modal-link-lr {{ color: #555; font-style: italic; }}
     @media (max-width: 480px) {{
       .modal-btn-row {{ flex-direction: column; }}
       .modal-btn {{ width: 100%; }}
@@ -570,12 +572,29 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str) -> dict:
             for b in popup_buttons
         )
         top_html = f'<div class="modal-top">{popup_top}</div>' if popup_top else ""
+
+        show_lr_link = (
+            lr_pps_val is not None
+            and (popup_variant == 1 or (popup_variant == 3 and hiive_anchor is not None))
+        )
+        lr_link_html = ""
+        if show_lr_link:
+            lr_verb = "list" if sell else "bid"
+            lr_link_html = (
+                f'<div class="modal-link-lr-row">'
+                f'<button type="button" class="modal-link modal-link-lr" id="modalLrBtn" '
+                f'data-price="{lr_pps_val:.2f}">'
+                f'Or {lr_verb} at last round price: ${lr_pps_val:,.2f}'
+                f'</button></div>'
+            )
+
         modal_html = f"""
     <div class="modal-overlay" id="priceModalOverlay" role="dialog" aria-modal="true">
       <div class="modal-card">
         {top_html}
         <div class="modal-heading">{popup_heading}</div>
         <div class="modal-btn-row">{btns_html}</div>
+        {lr_link_html}
         <div class="modal-links">
           <button type="button" class="modal-link modal-link-keep" id="modalKeepBtn">{popup_keep}</button>
           <button type="button" class="modal-link modal-link-back" id="modalBackBtn">Go back and set price manually</button>
@@ -623,6 +642,13 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str) -> dict:
           hideModal();
           submitConfirm();
         }});
+      }});
+
+      var lrBtn = document.getElementById('modalLrBtn');
+      if (lrBtn) lrBtn.addEventListener('click', function() {{
+        if (priceInput) priceInput.value = lrBtn.getAttribute('data-price');
+        hideModal();
+        submitConfirm();
       }});
 
       var keep = document.getElementById('modalKeepBtn');
