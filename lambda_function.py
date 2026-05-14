@@ -544,9 +544,9 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
             popup_keep = "Submit without price"
             popup_top = f"Others are {anchor_verb} at ${hiive_anchor:,.2f}"
             popup_buttons = [
-                {"price": round(_better(hiive_anchor, 20), 2), "label": "20% better", "color": "light"},
-                {"price": round(_better(hiive_anchor, 10), 2), "label": "10% better", "color": "dark"},
-                {"price": round(hiive_anchor, 2),              "label": "Match",      "color": "blue"},
+                {"price": round(hiive_anchor * 0.90, 2), "label": "10% below", "color": "blue"},
+                {"price": round(hiive_anchor,        2), "label": "Match",     "color": "dark"},
+                {"price": round(hiive_anchor * 1.10, 2), "label": "10% above", "color": "blue"},
             ]
         elif lr_pps_val is not None:
             popup_variant = 3
@@ -565,9 +565,9 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         popup_heading = "Improve your chances of finding a match:"
         popup_keep = f"Keep ${existing_price:,.2f}"
         popup_buttons = [
-            {"price": round(_better(hiive_anchor, 5), 2),   "label": "Best",    "color": "light"},
-            {"price": round(hiive_anchor, 2),               "label": "Match",   "color": "dark"},
-            {"price": round(_better(existing_price, 5), 2), "label": "Improve", "color": "blue"},
+            {"price": round(hiive_anchor * 0.90, 2), "label": "10% below", "color": "blue"},
+            {"price": round(hiive_anchor,        2), "label": "Match",     "color": "dark"},
+            {"price": round(hiive_anchor * 1.10, 2), "label": "10% above", "color": "blue"},
         ]
     else:
         popup_variant = 2
