@@ -352,11 +352,12 @@ def error_page(msg: str) -> dict:
 
 # ── Form page ─────────────────────────────────────────────────────────────────
 
-def render_form(deal: dict, company_rec: dict, unsub_url: str) -> dict:
+def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list = None) -> dict:
     cf           = deal.get("custom_fields", {})
     sell         = is_sell(cf)
     side         = "Sell" if sell else "Buy"
     company      = (deal.get("company") or {}).get("name", "")
+    company_id   = (deal.get("company") or {}).get("id")
     deal_id      = deal["id"]
     contact      = deal.get("primary_contact") or {}
     contact_name = contact.get("full_name", "")
@@ -466,34 +467,51 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str) -> dict:
     except (ValueError, TypeError):
         existing_price = None
 
-    # Hiive anchor: same-side preferred (competing peer prices),
-    # opposite-side fallback (what counterparty offers — could clear at this price).
-    # anchor_verb describes which Hiive field was used, not the user's side.
+    # Anchor: opposite side of the user — what the counterparty is offering, layered
+    # across Hiive and same-company mirror deals from the book.
+    # Sell user → bid side (max of hiive_bid and best mirror bid).
+    # Buy user  → ask side (min of hiive_ask and best mirror ask).
+    hiive_component = None
+    raw_h = hiive_bid if sell else hiive_ask
+    if raw_h not in (None, ""):
+        try:
+            hiive_component = float(str(raw_h).replace(",", "."))
+        except (ValueError, TypeError):
+            hiive_component = None
+
+    mirror_component = None
+    if all_deals and company_id:
+        mirror_is_sell = not sell
+        mirror_field = NET_FIELD if mirror_is_sell else GROSS_FIELD
+        candidates = []
+        for d in all_deals:
+            if d.get("id") == deal_id:
+                continue
+            if (d.get("deal_stage") or {}).get("id") != FIRM_STAGE_ID:
+                continue
+            if (d.get("company") or {}).get("id") != company_id:
+                continue
+            d_cf = d.get("custom_fields", {})
+            if is_sell(d_cf) != mirror_is_sell:
+                continue
+            raw_price = parse_cf(d_cf, mirror_field)
+            if raw_price in (None, ""):
+                continue
+            try:
+                p = float(str(raw_price).replace(",", "."))
+            except (ValueError, TypeError):
+                continue
+            if p > 0:
+                candidates.append(p)
+        if candidates:
+            mirror_component = max(candidates) if sell else min(candidates)
+
+    sources = [v for v in (hiive_component, mirror_component) if v is not None]
     hiive_anchor = None
     anchor_verb = None
-    if is_direct:
-        if sell:
-            # Sell: prefer competing seller asks; fall back to buyer bids
-            if hiive_ask not in (None, ""):
-                hiive_anchor = hiive_ask
-                anchor_verb = "listing"
-            elif hiive_bid not in (None, ""):
-                hiive_anchor = hiive_bid
-                anchor_verb = "bidding"
-        else:
-            # Buy: prefer competing buyer bids; fall back to seller asks
-            if hiive_bid not in (None, ""):
-                hiive_anchor = hiive_bid
-                anchor_verb = "bidding"
-            elif hiive_ask not in (None, ""):
-                hiive_anchor = hiive_ask
-                anchor_verb = "listing"
-        if hiive_anchor is not None:
-            try:
-                hiive_anchor = float(str(hiive_anchor).replace(",", "."))
-            except (ValueError, TypeError):
-                hiive_anchor = None
-                anchor_verb = None
+    if sources:
+        hiive_anchor = max(sources) if sell else min(sources)
+        anchor_verb = "bidding" if sell else "listing"
 
     # lr_pps: last-round price per share from company record
     lr_pps_val = None
@@ -805,10 +823,23 @@ def handle_get(params: dict) -> dict:
         if c_result["status"] == 200:
             company_rec = c_result["data"]
 
+    # Load full deals snapshot from S3 for mirror-anchor computation
+    all_deals = []
+    try:
+        s3  = boto3.client("s3")
+        obj = s3.get_object(Bucket="full-pipeline-cache", Key="deals.json")
+        data = json.loads(obj["Body"].read())
+        if isinstance(data, list):
+            all_deals = data
+        elif isinstance(data, dict):
+            all_deals = data.get("deals") or []
+    except Exception as e:
+        logger.warning(f"Failed to load deals.json from S3: {e}")
+
     contact_id = (deal.get("primary_contact") or {}).get("id", 0)
     unsub_url  = f"?action=unsubscribe&person_id={contact_id}&token={make_token(contact_id)}"
 
-    return render_form(deal, company_rec, unsub_url)
+    return render_form(deal, company_rec, unsub_url, all_deals)
 
 
 # ── POST handler ──────────────────────────────────────────────────────────────
