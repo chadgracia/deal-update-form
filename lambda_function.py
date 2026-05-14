@@ -885,13 +885,20 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         )
         return error_page("We couldn't save your update right now. Chad has been notified.")
 
-    # Fetch contact email
     contact_id = (current_deal.get("primary_contact") or {}).get("id", 0)
     contact_email = ""
     if contact_id:
         p = call_pipeline_api("GET", f"/people/{contact_id}.json", jwt=jwt)
         if p["status"] == 200:
-            contact_email = p["data"].get("email") or ""
+            person = p["data"]
+            contact_email = person.get("email") or ""
+            live_name = (person.get("full_name") or "").strip()
+            if not live_name:
+                first = (person.get("first_name") or "").strip()
+                last  = (person.get("last_name") or "").strip()
+                live_name = f"{first} {last}".strip()
+            if live_name:
+                contact_name = live_name
 
     def fmt_email(val):
         if val is None or val == "":
