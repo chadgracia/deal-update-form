@@ -97,16 +97,31 @@ def call_pipeline_api(method, endpoint, payload=None, jwt=None):
         return {"status": 500, "data": str(e)}
 
 
-def send_email(to_address: str, subject: str, body: str):
+def send_email(to_address: str, subject: str, body: str, html: str = None):
     ses = boto3.client("ses", region_name="us-east-1")
+    body_block = {"Text": {"Data": body}}
+    if html:
+        body_block["Html"] = {"Data": html}
     ses.send_email(
         Source=SES_SENDER,
         Destination={"ToAddresses": [to_address]},
         Message={
             "Subject": {"Data": subject},
-            "Body":    {"Text": {"Data": body}}
+            "Body":    body_block
         }
     )
+
+
+EMAIL_WRAPPER_STYLE = (
+    "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,"
+    "Helvetica,Arial,sans-serif;max-width:720px;margin:0 auto;padding:24px;"
+    "color:#1f2937;font-size:14px;line-height:1.5;"
+)
+EMAIL_LINK_STYLE = "color:#2563eb;text-decoration:none;font-weight:500;"
+
+
+def email_html(inner: str) -> str:
+    return f'<div style="{EMAIL_WRAPPER_STYLE}">{inner}</div>'
 
 
 def parse_cf(cf, field):
@@ -788,10 +803,17 @@ def handle_get(params: dict) -> dict:
             return error_page("Invalid unsubscribe link.")
         if not verify_token(pid, token):
             return error_page("Invalid or expired link.")
+        person_url = f"https://app.pipelinecrm.com/people/{pid}"
         send_email(
             AGENT_EMAIL,
             f"Unsubscribe request: person {pid}",
-            f"Please set newsletter to Unsubscribed for person ID {pid}.\nhttps://app.pipelinecrm.com/people/{pid}"
+            f"Please set newsletter to Unsubscribed for person ID {pid}.\n{person_url}",
+            html=email_html(
+                f'<p style="margin:0 0 12px 0;">Please set newsletter to '
+                f'<strong>Unsubscribed</strong> for person ID {pid}.</p>'
+                f'<p style="margin:0;font-size:13px;">'
+                f'<a href="{person_url}" style="{EMAIL_LINK_STYLE}">Open person {pid}</a></p>'
+            )
         )
         return html_response("""
         <h1>Unsubscribed</h1>
@@ -869,11 +891,19 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     jwt = get_jwt()
 
     if submit_action == "cancel":
+        deal_url = f"https://app.pipelinecrm.com/deals/{deal_id}"
         send_email(
             CHAD_EMAIL,
             f"Deal cancellation via update form: deal {deal_id}",
             f"The client clicked CANCEL — deal {deal_id} should remain Obsolete.\n"
-            f"Pipeline: https://app.pipelinecrm.com/deals/{deal_id}"
+            f"Pipeline: {deal_url}",
+            html=email_html(
+                f'<p style="margin:0 0 12px 0;">The client clicked '
+                f'<strong>CANCEL</strong> — deal {deal_id} should remain '
+                f'<strong>Obsolete</strong>.</p>'
+                f'<p style="margin:0;font-size:13px;">'
+                f'<a href="{deal_url}" style="{EMAIL_LINK_STYLE}">Open deal {deal_id}</a></p>'
+            )
         )
         return success_page("Deal removed")
 
@@ -884,6 +914,13 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     contact_name   = (current_deal.get("primary_contact") or {}).get("full_name", "client")
     company        = (current_deal.get("company") or {}).get("name", "")
     old_stage      = (current_deal.get("deal_stage") or {}).get("name", "—")
+
+    company_id  = (current_deal.get("company") or {}).get("id")
+    company_rec = {}
+    if company_id:
+        c_result = call_pipeline_api("GET", f"/companies/{company_id}.json", jwt=jwt)
+        if c_result["status"] == 200:
+            company_rec = c_result["data"]
 
     # Extract submitted fields
     gross_val    = params.get("gross", "").strip()
@@ -930,15 +967,36 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
 
     if result["status"] != 200:
         logger.error(f"Pipeline update failed: {result}")
-        send_email(
-            CHAD_EMAIL,
-            f"⚠ Deal update failed — deal {deal_id}",
+        fail_text = (
             f"Client submitted an update but Pipeline write failed.\n"
             f"HTTP {result['status']}: {result['data']}\n\n"
             f"Submitted: net={net_val or '—'} gross={gross_val or '—'} "
             f"min={min_val or '—'} max={max_val or '—'}\n"
             f"Comments: {comments or '—'}\n"
             f"Pipeline: https://app.pipelinecrm.com/deals/{deal_id}"
+        )
+        deal_url = f"https://app.pipelinecrm.com/deals/{deal_id}"
+        fail_html = email_html(
+            '<p style="margin:0 0 12px 0;color:#b91c1c;font-weight:600;">'
+            'Client submitted an update but Pipeline write failed.</p>'
+            f'<p style="margin:0 0 8px 0;font-size:13px;">'
+            f'<strong>HTTP {result["status"]}:</strong> {result["data"]}</p>'
+            '<p style="margin:0 0 4px 0;font-size:13px;color:#4b5563;">Submitted:</p>'
+            f'<ul style="margin:0 0 12px 18px;padding:0;font-size:13px;color:#4b5563;">'
+            f'<li>net: {net_val or "—"}</li>'
+            f'<li>gross: {gross_val or "—"}</li>'
+            f'<li>min: {min_val or "—"}</li>'
+            f'<li>max: {max_val or "—"}</li>'
+            f'<li>comments: {comments or "—"}</li>'
+            f'</ul>'
+            f'<p style="margin:0;font-size:13px;">'
+            f'<a href="{deal_url}" style="{EMAIL_LINK_STYLE}">Open deal {deal_id}</a></p>'
+        )
+        send_email(
+            CHAD_EMAIL,
+            f"⚠ Deal update failed — deal {deal_id}",
+            fail_text,
+            html=fail_html,
         )
         return error_page("We couldn't save your update right now. Chad has been notified.")
 
@@ -971,25 +1029,45 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     side = "Sell" if is_sell(current_cf) else "Buy"
     deal_name = current_deal.get("name", f"{side} Order: {company}")
 
-    # For sell side use net, for buy side use gross
-    if side == "Sell":
-        price_label = "Net price"
-        price_old = fmt_email(parse_cf(current_cf, NET_FIELD))
-        price_new = fmt_email(net_val or parse_cf(current_cf, NET_FIELD))
+    # Net and Gross "after" reflect the actual write: setting one clears the other
+    current_net   = parse_cf(current_cf, NET_FIELD)
+    current_gross = parse_cf(current_cf, GROSS_FIELD)
+    if net_val:
+        net_after, gross_after = net_val, 0
+    elif gross_val:
+        net_after, gross_after = 0, gross_val
     else:
-        price_label = "Gross price"
-        price_old = fmt_email(parse_cf(current_cf, GROSS_FIELD))
-        price_new = fmt_email(gross_val or parse_cf(current_cf, GROSS_FIELD))
+        net_after, gross_after = current_net, current_gross
+
+    # Market row from company Hiive Bid/Ask (sell → bid, buy → ask)
+    sell_deal     = is_sell(current_cf)
+    ccf           = company_rec.get("custom_fields", {}) if company_rec else {}
+    hiive_field   = HIIVE_BID_FIELD if sell_deal else HIIVE_ASK_FIELD
+    hiive_val_raw = parse_cf(ccf, hiive_field)
+    if hiive_val_raw in (None, ""):
+        market_value = "— (no market data)"
+    else:
+        market_value = fmt_email(hiive_val_raw)
+
+    # Header size: prefer submitted max, else current Max Size; format with commas
+    max_after_raw = max_val or parse_cf(current_cf, MAX_SIZE_FIELD)
+    try:
+        size_display = f"{float(str(max_after_raw).replace(',', '')):,.0f}"
+    except (ValueError, TypeError):
+        size_display = "—"
 
     rows = [
-        (price_label,  price_old,   price_new),
-        ("Min size",   fmt_email(parse_cf(current_cf, MIN_SIZE_FIELD)), fmt_email(min_val or parse_cf(current_cf, MIN_SIZE_FIELD))),
-        ("Max size",   fmt_email(parse_cf(current_cf, MAX_SIZE_FIELD)), fmt_email(max_val or parse_cf(current_cf, MAX_SIZE_FIELD))),
-        ("Mgmt fee",   fmt_email(parse_cf(current_cf, MGMT_FEE_FIELD)), fmt_email(mgmt_fee_val or parse_cf(current_cf, MGMT_FEE_FIELD))),
-        ("Carry",      fmt_email(parse_cf(current_cf, CARRY_FIELD)),    fmt_email(carry_val or parse_cf(current_cf, CARRY_FIELD))),
-        ("Stage",      old_stage, new_stage_name),
+        ("Net price",   fmt_email(current_net),   fmt_email(net_after)),
+        ("Market",      "—",                      market_value),
+        ("Gross price", fmt_email(current_gross), fmt_email(gross_after)),
+        ("Min size",    fmt_email(parse_cf(current_cf, MIN_SIZE_FIELD)), fmt_email(min_val or parse_cf(current_cf, MIN_SIZE_FIELD))),
+        ("Max size",    fmt_email(parse_cf(current_cf, MAX_SIZE_FIELD)), fmt_email(max_val or parse_cf(current_cf, MAX_SIZE_FIELD))),
+        ("Mgmt fee",    fmt_email(parse_cf(current_cf, MGMT_FEE_FIELD)), fmt_email(mgmt_fee_val or parse_cf(current_cf, MGMT_FEE_FIELD))),
+        ("Carry",       fmt_email(parse_cf(current_cf, CARRY_FIELD)),    fmt_email(carry_val or parse_cf(current_cf, CARRY_FIELD))),
+        ("Stage",       old_stage, new_stage_name),
     ]
 
+    # Plain-text fallback (preserve existing line-based format)
     col1 = max(len(r[0]) for r in rows)
     col2 = max(len(r[1]) for r in rows)
 
@@ -997,7 +1075,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     divider = "─" * (col1 + col2 + 20)
     table_lines = [header, divider]
     for label, old_v, new_v in rows:
-        changed = " ✓" if old_v != new_v else ""
+        changed = " ✓" if (label != "Market" and old_v != new_v) else ""
         table_lines.append(f"{label:<{col1}}  {old_v:<{col2}}  {new_v}{changed}")
 
     email_lines = [
@@ -1012,10 +1090,81 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         email_lines += ["", f"Client note: {comments}"]
     email_lines += ["", "Refresh reset to 60 days."]
 
+    # HTML body
+    th_style = (
+        "text-align:left;font-size:12px;font-weight:600;color:#6b7280;"
+        "padding:8px 10px;background:#f9fafb;border-bottom:1px solid #e5e7eb;"
+    )
+    td_style = "font-size:13px;padding:10px;border-bottom:1px solid #f3f4f6;"
+    body_rows_html = []
+    for label, old_v, new_v in rows:
+        is_market = (label == "Market")
+        changed = (not is_market) and (old_v != new_v)
+        tr_open = '<tr style="background:#fafafa;">' if is_market else "<tr>"
+        check = ' <span style="color:#16a34a;">✓</span>' if changed else ""
+        body_rows_html.append(
+            f'{tr_open}'
+            f'<td style="{td_style}">{label}</td>'
+            f'<td style="{td_style}">{old_v}</td>'
+            f'<td style="{td_style}">{new_v}{check}</td>'
+            f'</tr>'
+        )
+
+    table_html = (
+        '<table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-bottom:16px;">'
+        '<thead><tr>'
+        f'<th style="{th_style}">Field</th>'
+        f'<th style="{th_style}">Before</th>'
+        f'<th style="{th_style}">After</th>'
+        '</tr></thead>'
+        f'<tbody>{"".join(body_rows_html)}</tbody>'
+        '</table>'
+    )
+
+    header_html = (
+        '<h2 style="font-size:18px;font-weight:600;color:#111827;'
+        'margin:0 0 6px 0;padding-bottom:6px;border-bottom:1px solid #e5e7eb;">'
+        f'{company}: {size_display} {"Sell" if sell_deal else "Buy"}'
+        '</h2>'
+    )
+
+    contact_email_html = (
+        f'<a href="mailto:{contact_email}" style="{EMAIL_LINK_STYLE}">{contact_email}</a>'
+        if contact_email else "—"
+    )
+    contact_line_html = (
+        f'<p style="margin:0 0 4px 0;color:#4b5563;font-size:13px;">'
+        f'{contact_name} — {contact_email_html}</p>'
+    )
+
+    links_html = (
+        '<p style="margin:0 0 16px 0;font-size:13px;">'
+        f'<a href="https://app.pipelinecrm.com/deals/{deal_id}" style="{EMAIL_LINK_STYLE}">Deal</a>'
+        ' &nbsp;·&nbsp; '
+        f'<a href="https://app.pipelinecrm.com/people/{contact_id}" style="{EMAIL_LINK_STYLE}">Lead</a>'
+        '</p>'
+    )
+
+    comments_html = ""
+    if comments:
+        comments_html = (
+            '<p style="margin:16px 0 0 0;font-size:13px;color:#4b5563;">'
+            '<span style="font-weight:600;color:#1f2937;">Client note:</span> '
+            f'{comments}</p>'
+        )
+
+    footer_html = (
+        '<p style="margin:16px 0 0 0;color:#4b5563;font-size:13px;">'
+        'Refresh reset to 60 days.</p>'
+    )
+
+    inner_html = header_html + contact_line_html + links_html + table_html + comments_html + footer_html
+
     send_email(
         CHAD_EMAIL,
         f"{deal_name} — {contact_name} (#{deal_id})",
-        "\n".join(email_lines)
+        "\n".join(email_lines),
+        html=email_html(inner_html),
     )
 
     return success_page("Update received!")
