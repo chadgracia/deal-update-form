@@ -383,6 +383,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
     max_val      = fmt_input(parse_cf(cf, MAX_SIZE_FIELD))
     mgmt_fee_val = fmt_input(parse_cf(cf, MGMT_FEE_FIELD))
     carry_val    = fmt_input(parse_cf(cf, CARRY_FIELD))
+    share_val    = fmt_input(parse_cf(cf, SHARE_COUNT_FIELD))
 
     # Detect SPV structure
     structure_raw = parse_cf(cf, STRUCTURE_FIELD)
@@ -744,6 +745,16 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
       {hiive_btn_html}
 
       <div class="field">
+        <label>Number of Shares</label>
+        <input type="number" name="share_count" value="{share_val}" step="1" placeholder="e.g. 100000">
+      </div>
+
+      <div class="field">
+        <label>Minimum Size ($)</label>
+        <input type="number" name="min_size" value="{min_val}" step="1" placeholder="e.g. 100000">
+      </div>
+
+      <div class="field">
         <label>Comments (optional)</label>
         <input type="text" name="comments" placeholder="Any notes for the team...">
       </div>
@@ -923,36 +934,48 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
             company_rec = c_result["data"]
 
     # Extract submitted fields
+    def _f(v):
+        if v in (None, ""): return None
+        try: return float(str(v).replace(",", "."))
+        except (ValueError, TypeError): return None
+
     gross_val    = params.get("gross", "").strip()
     net_val      = params.get("net", "").strip()
+    share_val    = params.get("share_count", "").strip().replace(",", "")
     min_val      = params.get("min_size", "").strip().replace(",", "")
-    max_val      = params.get("max_size", "").strip().replace(",", "")
     mgmt_fee_val = params.get("mgmt_fee", "").strip()
     carry_val    = params.get("carry", "").strip()
     comments     = params.get("comments", "").strip()
 
-    has_price      = bool(gross_val or net_val)
-    has_size       = bool(max_val)
-    new_stage      = FIRM_STAGE_ID if (has_price and has_size) else INQUIRY_STAGE_ID
+    sell       = is_sell(current_cf)
+    eff_net    = _f(net_val)   or _f(parse_cf(current_cf, NET_FIELD))
+    eff_gross  = _f(gross_val) or _f(parse_cf(current_cf, GROSS_FIELD))
+    eff_shares = _f(share_val) or _f(parse_cf(current_cf, SHARE_COUNT_FIELD))
+    structure  = parse_cf(current_cf, STRUCTURE_FIELD)
+
+    # Sell-side: gross is an estimate from net × 1.05, regardless of what's stored.
+    if sell and eff_net:
+        eff_gross = round(eff_net * 1.05, 4)
+
+    has_shares    = bool(eff_shares)
+    has_price     = bool(eff_net) or bool(eff_gross)
+    has_structure = bool(structure)
+    new_stage      = FIRM_STAGE_ID if (has_shares and has_price and has_structure) else INQUIRY_STAGE_ID
     new_stage_name = "Firm" if new_stage == FIRM_STAGE_ID else "Inquiry"
 
     # Build Pipeline update payload
-    custom = {REFRESH_FIELD: 60}  # reset to 60 days after client confirms
+    custom = {REFRESH_FIELD: 60}
     if net_val:
-        try:
-            custom[NET_FIELD] = float(net_val)
-            custom[GROSS_FIELD] = 0  # clear gross when net is set
+        try: custom[NET_FIELD] = float(net_val)
         except ValueError: pass
     if gross_val:
-        try:
-            custom[GROSS_FIELD] = float(gross_val)
-            custom[NET_FIELD] = 0  # clear net when gross is set
+        try: custom[GROSS_FIELD] = float(gross_val)
+        except ValueError: pass
+    if share_val:
+        try: custom[SHARE_COUNT_FIELD] = float(share_val)
         except ValueError: pass
     if min_val:
         try: custom[MIN_SIZE_FIELD] = float(min_val)
-        except ValueError: pass
-    if max_val:
-        try: custom[MAX_SIZE_FIELD] = float(max_val)
         except ValueError: pass
     if mgmt_fee_val:
         try: custom[MGMT_FEE_FIELD] = float(mgmt_fee_val)
@@ -960,6 +983,14 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     if carry_val:
         try: custom[CARRY_FIELD] = float(carry_val)
         except ValueError: pass
+
+    # Sell-side: write estimated gross so CRM has both sides for downstream consumers.
+    if sell and eff_net:
+        custom[GROSS_FIELD] = round(eff_net * 1.05, 4)
+
+    # Derived max: shares × gross.
+    if eff_shares and eff_gross:
+        custom[MAX_SIZE_FIELD] = round(eff_shares * eff_gross, 2)
 
     payload = {"deal": {"deal_stage_id": new_stage, "custom_fields": custom}}
     result  = call_pipeline_api("PUT", f"/deals/{deal_id}.json", payload, jwt=jwt)
@@ -971,7 +1002,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
             f"Client submitted an update but Pipeline write failed.\n"
             f"HTTP {result['status']}: {result['data']}\n\n"
             f"Submitted: net={net_val or '—'} gross={gross_val or '—'} "
-            f"min={min_val or '—'} max={max_val or '—'}\n"
+            f"shares={share_val or '—'} min={min_val or '—'}\n"
             f"Comments: {comments or '—'}\n"
             f"Pipeline: https://app.pipelinecrm.com/deals/{deal_id}"
         )
@@ -985,8 +1016,8 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
             f'<ul style="margin:0 0 12px 18px;padding:0;font-size:13px;color:#4b5563;">'
             f'<li>net: {net_val or "—"}</li>'
             f'<li>gross: {gross_val or "—"}</li>'
+            f'<li>shares: {share_val or "—"}</li>'
             f'<li>min: {min_val or "—"}</li>'
-            f'<li>max: {max_val or "—"}</li>'
             f'<li>comments: {comments or "—"}</li>'
             f'</ul>'
             f'<p style="margin:0;font-size:13px;">'
@@ -1029,15 +1060,13 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     side = "Sell" if is_sell(current_cf) else "Buy"
     deal_name = current_deal.get("name", f"{side} Order: {company}")
 
-    # Net and Gross "after" reflect the actual write: setting one clears the other
+    # Net and Gross "after" reflect what we actually wrote (or kept) to the CRM
     current_net   = parse_cf(current_cf, NET_FIELD)
     current_gross = parse_cf(current_cf, GROSS_FIELD)
-    if net_val:
-        net_after, gross_after = net_val, 0
-    elif gross_val:
-        net_after, gross_after = 0, gross_val
-    else:
-        net_after, gross_after = current_net, current_gross
+    new_net       = custom.get(NET_FIELD)
+    new_gross     = custom.get(GROSS_FIELD)
+    net_after     = new_net   if new_net   is not None else current_net
+    gross_after   = new_gross if new_gross is not None else current_gross
 
     # Market row from company Hiive Bid/Ask (sell → bid, buy → ask)
     sell_deal     = is_sell(current_cf)
@@ -1049,8 +1078,11 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     else:
         market_value = fmt_email(hiive_val_raw)
 
-    # Header size: prefer submitted max, else current Max Size; format with commas
-    max_after_raw = max_val or parse_cf(current_cf, MAX_SIZE_FIELD)
+    new_max    = custom.get(MAX_SIZE_FIELD)
+    new_shares = custom.get(SHARE_COUNT_FIELD)
+
+    # Header size: prefer derived max, else current Max Size; format with commas
+    max_after_raw = new_max if new_max is not None else parse_cf(current_cf, MAX_SIZE_FIELD)
     try:
         size_display = f"{float(str(max_after_raw).replace(',', '')):,.0f}"
     except (ValueError, TypeError):
@@ -1060,10 +1092,11 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         ("Net price",   fmt_email(current_net),   fmt_email(net_after)),
         ("Market",      "—",                      market_value),
         ("Gross price", fmt_email(current_gross), fmt_email(gross_after)),
-        ("Min size",    fmt_email(parse_cf(current_cf, MIN_SIZE_FIELD)), fmt_email(min_val or parse_cf(current_cf, MIN_SIZE_FIELD))),
-        ("Max size",    fmt_email(parse_cf(current_cf, MAX_SIZE_FIELD)), fmt_email(max_val or parse_cf(current_cf, MAX_SIZE_FIELD))),
-        ("Mgmt fee",    fmt_email(parse_cf(current_cf, MGMT_FEE_FIELD)), fmt_email(mgmt_fee_val or parse_cf(current_cf, MGMT_FEE_FIELD))),
-        ("Carry",       fmt_email(parse_cf(current_cf, CARRY_FIELD)),    fmt_email(carry_val or parse_cf(current_cf, CARRY_FIELD))),
+        ("Shares",      fmt_email(parse_cf(current_cf, SHARE_COUNT_FIELD)), fmt_email(new_shares if new_shares is not None else parse_cf(current_cf, SHARE_COUNT_FIELD))),
+        ("Min size",    fmt_email(parse_cf(current_cf, MIN_SIZE_FIELD)),    fmt_email(min_val or parse_cf(current_cf, MIN_SIZE_FIELD))),
+        ("Max size",    fmt_email(parse_cf(current_cf, MAX_SIZE_FIELD)),    fmt_email(new_max if new_max is not None else parse_cf(current_cf, MAX_SIZE_FIELD))),
+        ("Mgmt fee",    fmt_email(parse_cf(current_cf, MGMT_FEE_FIELD)),    fmt_email(mgmt_fee_val or parse_cf(current_cf, MGMT_FEE_FIELD))),
+        ("Carry",       fmt_email(parse_cf(current_cf, CARRY_FIELD)),       fmt_email(carry_val or parse_cf(current_cf, CARRY_FIELD))),
         ("Stage",       old_stage, new_stage_name),
     ]
 
@@ -1086,6 +1119,8 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         "",
         *table_lines,
     ]
+    if sell and eff_net:
+        email_lines.append(f"(Estimated gross = net × 1.05 = ${eff_net * 1.05:,.2f}/share)")
     if comments:
         email_lines += ["", f"Client note: {comments}"]
     email_lines += ["", "Refresh reset to 60 days."]
