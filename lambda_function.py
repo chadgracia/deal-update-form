@@ -1057,6 +1057,36 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         except Exception:
             return str(val)
 
+    def fmt_count(val):
+        if val is None or val == "":
+            return "—"
+        try:
+            f = float(str(val).replace(",", "."))
+            if f == int(f):
+                return f"{int(f):,}"
+            return f"{f:,.2f}"
+        except Exception:
+            return str(val)
+
+    def fmt_size_short(val):
+        # Round to nearest $50K below $1M, nearest $500K at/above $1M.
+        if val is None or val == "":
+            return "—"
+        try:
+            n = float(str(val).replace(",", ""))
+        except (ValueError, TypeError):
+            return "—"
+        if n < 1_000_000:
+            rounded_k = int((n + 25_000) // 50_000) * 50
+        else:
+            rounded_k = int((n + 250_000) // 500_000) * 500
+        if rounded_k >= 1000:
+            millions = rounded_k / 1000
+            if millions == int(millions):
+                return f"${int(millions)}M"
+            return f"${millions:.1f}M"
+        return f"${rounded_k}K"
+
     side = "Sell" if is_sell(current_cf) else "Buy"
     deal_name = current_deal.get("name", f"{side} Order: {company}")
 
@@ -1081,18 +1111,16 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     new_max    = custom.get(MAX_SIZE_FIELD)
     new_shares = custom.get(SHARE_COUNT_FIELD)
 
-    # Header size: prefer derived max, else current Max Size; format with commas
+    # Header size: prefer derived max, else current Max Size; rounded to nearest
+    # $50K below $1M, nearest $500K at/above $1M.
     max_after_raw = new_max if new_max is not None else parse_cf(current_cf, MAX_SIZE_FIELD)
-    try:
-        size_display = f"{float(str(max_after_raw).replace(',', '')):,.0f}"
-    except (ValueError, TypeError):
-        size_display = "—"
+    size_display = fmt_size_short(max_after_raw)
 
     rows = [
         ("Net price",   fmt_email(current_net),   fmt_email(net_after)),
         ("Market",      "—",                      market_value),
         ("Gross price", fmt_email(current_gross), fmt_email(gross_after)),
-        ("Shares",      fmt_email(parse_cf(current_cf, SHARE_COUNT_FIELD)), fmt_email(new_shares if new_shares is not None else parse_cf(current_cf, SHARE_COUNT_FIELD))),
+        ("Shares",      fmt_count(parse_cf(current_cf, SHARE_COUNT_FIELD)), fmt_count(new_shares if new_shares is not None else parse_cf(current_cf, SHARE_COUNT_FIELD))),
         ("Min size",    fmt_email(parse_cf(current_cf, MIN_SIZE_FIELD)),    fmt_email(min_val or parse_cf(current_cf, MIN_SIZE_FIELD))),
         ("Max size",    fmt_email(parse_cf(current_cf, MAX_SIZE_FIELD)),    fmt_email(new_max if new_max is not None else parse_cf(current_cf, MAX_SIZE_FIELD))),
         ("Mgmt fee",    fmt_email(parse_cf(current_cf, MGMT_FEE_FIELD)),    fmt_email(mgmt_fee_val or parse_cf(current_cf, MGMT_FEE_FIELD))),
