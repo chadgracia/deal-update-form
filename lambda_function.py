@@ -31,6 +31,26 @@ HMAC_SECRET         = os.environ.get("HMAC_SECRET", "change-me-in-env")
 SES_SENDER          = "agent@agent.graciagroup.com"
 AGENT_EMAIL         = "agent@agent.graciagroup.com"
 CHAD_EMAIL          = "cgracia@rainmakersecurities.com"
+QA_BUCKET   = "gracia-deal-qa"
+QA_SELF_URL = "https://s5qv2qkmjt2qejliwchvqukseq0wgwff.lambda-url.us-east-1.on.aws/"
+QA_TEXT = {
+    "accept_bid":   "Would you accept this bid?",
+    "deadline":     "When is the deadline to commit?",
+    "class":        "Are these shares common or preferred?",
+    "min_max":      "What is the minimum / maximum size?",
+    "shares_avail": "How many shares are available to buy?",
+    "seller_fee":   "What is the seller's one-time fee?",
+    "upfront_fee":  "Would you accept an upfront fee instead of management fee and carry?",
+    "nda_l1":       "Can you provide full transparency on the L1 manager under an NDA?",
+    "direct_trade": "Are you able to do a direct trade?",
+    "cash_on_hand": "Do you have cash on hand?",
+    "qp_accredited":"Are you a QP or accredited?",
+    "iqf_done":     "Have you completed the IQF with Rainmaker?",
+    "on_cap_table": "Are you already on the cap table?",
+    "no_data_room": "Can you confirm no data room / financials needed?",
+    "accept_common":"Would you accept common shares?",
+    "move_bid_up":  "Would you move your bid up?",
+}
 TRADES_URL          = "https://trades.graciagroup.com"
 PIPELINE_JWT_BUCKET = "pipeline-token"
 PIPELINE_JWT_KEY    = "pipeline-jwt.json"
@@ -891,6 +911,9 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
 
     logger.info(f"POST parsed fields: {list(params.keys())}")
 
+    if params.get("qa") == "submit":
+        return handle_qa_submit(params)
+
     deal_id_str   = params.get("deal_id", "")
     submit_action = params.get("submit_action", "confirm")
 
@@ -1231,6 +1254,86 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     )
 
     return success_page("Update received!")
+
+
+def handle_qa_submit(params: dict) -> dict:
+    """Buyer submitted a batch of questions from the public deal page. Stores the set
+    in S3 keyed by an opaque set_id (so the buyer's email never rides in the seller's
+    link) and emails the seller a magic link to answer."""
+    try:
+        deal_id = int(params.get("deal_id", ""))
+    except (ValueError, TypeError):
+        return error_page("Invalid submission.")
+
+    buyer_email = (params.get("buyer_email", "") or "").strip()
+    buyer_name  = (params.get("buyer_name", "") or "").strip()
+    if "@" not in buyer_email:
+        return error_page("Please enter a valid email so we can send you the answers.")
+
+    selected = [k[2:] for k in params if k.startswith("q_")]
+    if not selected:
+        return error_page("Please select at least one question.")
+
+    bid_amount = (params.get("bid_amount", "") or "").strip()
+    bid_size   = (params.get("bid_size", "") or "").strip()
+
+    jwt = get_jwt()
+    deal = call_pipeline_api("GET", f"/deals/{deal_id}.json", jwt=jwt)
+    deal_data = deal.get("data", {}) if isinstance(deal, dict) else {}
+    deal_name = deal_data.get("name", f"Deal {deal_id}")
+    contact_id = (deal_data.get("primary_contact") or {}).get("id", 0)
+
+    seller_email = ""
+    seller_first = ""
+    if contact_id:
+        p = call_pipeline_api("GET", f"/people/{contact_id}.json", jwt=jwt)
+        person = p.get("data", {}) if isinstance(p, dict) else {}
+        seller_email = (person.get("email") or "").strip()
+        seller_first = (person.get("first_name") or "").strip()
+
+    set_id = base64.urlsafe_b64encode(os.urandom(12)).decode().rstrip("=")
+    record = {
+        "set_id": set_id, "deal_id": deal_id, "deal_name": deal_name,
+        "buyer_email": buyer_email, "buyer_name": buyer_name,
+        "question_ids": selected, "bid_amount": bid_amount, "bid_size": bid_size,
+        "seller_email": seller_email, "status": "pending",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    boto3.client("s3", region_name="us-east-1").put_object(
+        Bucket=QA_BUCKET, Key=f"{deal_id}/{set_id}.json",
+        Body=json.dumps(record).encode(), ContentType="application/json",
+    )
+
+    def q_line(qid):
+        if qid == "accept_bid" and bid_amount:
+            size_txt = f" for {bid_size}" if bid_size else ""
+            return f"- Would you accept a bid of {bid_amount}/share{size_txt}?"
+        return f"- {QA_TEXT.get(qid, qid)}"
+    q_block = "\n".join(q_line(q) for q in selected)
+
+    answer_link = f"{QA_SELF_URL}?qa=answer&deal_id={deal_id}&set={set_id}&token={make_token(set_id)}"
+
+    if seller_email:
+        hello = f"Hi {seller_first}," if seller_first else "Hi,"
+        send_email(
+            seller_email,
+            f"A buyer is interested in {deal_name} — quick questions",
+            f"{hello}\n\nA prospective buyer is interested in {deal_name} and asked:\n\n"
+            f"{q_block}\n\nYou can answer in a few taps here:\n{answer_link}\n\n— Gracia Group",
+        )
+
+    send_email(
+        CHAD_EMAIL,
+        f"Buyer Q&A: {deal_name} (#{deal_id})",
+        f"New buyer Q&A on {deal_name} (deal {deal_id}).\n\n"
+        f"Buyer: {buyer_name or '—'} <{buyer_email}>\n"
+        f"Seller emailed: {seller_email or 'NO EMAIL ON FILE — handle manually'}\n\n"
+        f"Questions:\n{q_block}\n\n"
+        f"Seller's answer link: {answer_link}\n"
+        f"Pipeline: https://app.pipelinecrm.com/deals/{deal_id}",
+    )
+
+    return success_page("Your questions have been sent to the counterparty.")
 
 
 # ── Lambda entry point ────────────────────────────────────────────────────────
