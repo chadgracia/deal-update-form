@@ -51,6 +51,24 @@ QA_TEXT = {
     "accept_common":"Would you accept common shares?",
     "move_bid_up":  "Would you move your bid up?",
 }
+QA_ANSWER = {
+    "accept_bid":    {"type": "offer"},
+    "deadline":      {"type": "text"},
+    "class":         {"type": "choice", "options": ["Common", "Preferred", "Both"]},
+    "min_max":       {"type": "text"},
+    "shares_avail":  {"type": "number"},
+    "seller_fee":    {"type": "text"},
+    "upfront_fee":   {"type": "bool"},
+    "nda_l1":        {"type": "bool"},
+    "direct_trade":  {"type": "bool"},
+    "cash_on_hand":  {"type": "bool"},
+    "qp_accredited": {"type": "choice", "options": ["QP", "Accredited", "Neither"]},
+    "iqf_done":      {"type": "bool"},
+    "on_cap_table":  {"type": "bool"},
+    "no_data_room":  {"type": "bool"},
+    "accept_common": {"type": "bool"},
+    "move_bid_up":   {"type": "offer"},
+}
 TRADES_URL          = "https://trades.graciagroup.com"
 PIPELINE_JWT_BUCKET = "pipeline-token"
 PIPELINE_JWT_KEY    = "pipeline-jwt.json"
@@ -1336,6 +1354,90 @@ def handle_qa_submit(params: dict) -> dict:
     return success_page("Your questions have been sent to the counterparty.")
 
 
+def handle_qa_answer_page(qs: dict) -> dict:
+    """GET ?qa=answer — the counterparty's tokened page to answer a buyer's questions."""
+    deal_id = qs.get("deal_id", "")
+    set_id  = qs.get("set", "")
+    token   = qs.get("token", "")
+
+    if not (deal_id and set_id and token) or not verify_token(set_id, token):
+        return error_page("This link is invalid or has expired.")
+
+    try:
+        obj = boto3.client("s3", region_name="us-east-1").get_object(
+            Bucket=QA_BUCKET, Key=f"{deal_id}/{set_id}.json")
+        record = json.loads(obj["Body"].read().decode())
+    except Exception:
+        return error_page("This request could not be found.")
+
+    deal_name  = record.get("deal_name", f"Deal {deal_id}")
+    bid_amount = record.get("bid_amount", "")
+    bid_size   = record.get("bid_size", "")
+
+    rows = ""
+    for qid in record.get("question_ids", []):
+        qtext = QA_TEXT.get(qid, qid)
+        atype = QA_ANSWER.get(qid, {}).get("type", "text")
+        opts  = QA_ANSWER.get(qid, {}).get("options", [])
+
+        rows += f'<div class="field"><label>{qtext}</label>'
+        if atype == "bool":
+            rows += (
+                f'<label class="opt"><input type="radio" name="a_{qid}" value="Yes"> Yes</label>'
+                f'<label class="opt"><input type="radio" name="a_{qid}" value="No"> No</label>'
+                f'<input type="text" name="o_{qid}" placeholder="Or add a note (sent to Gracia only)">'
+            )
+        elif atype == "choice":
+            for o in opts:
+                rows += f'<label class="opt"><input type="radio" name="a_{qid}" value="{o}"> {o}</label>'
+            rows += f'<input type="text" name="o_{qid}" placeholder="Other (sent to Gracia only)">'
+        elif atype == "offer":
+            if bid_amount:
+                offer_txt = f"Buyer offers {bid_amount}/share"
+                if bid_size:
+                    offer_txt += f" for {bid_size}"
+            else:
+                offer_txt = "Buyer's offer"
+            rows += (
+                f'<div class="offer">{offer_txt}</div>'
+                f'<label class="opt"><input type="radio" name="a_{qid}" value="Accept"> Accept</label>'
+                f'<label class="opt"><input type="radio" name="a_{qid}" value="Decline"> Decline</label>'
+                f'<input type="text" name="c_{qid}" placeholder="Or counter at $___/share">'
+                f'<input type="text" name="o_{qid}" placeholder="Add a note (sent to Gracia only)">'
+            )
+        elif atype == "number":
+            rows += f'<input type="number" step="any" name="a_{qid}" placeholder="Enter a number">'
+        else:
+            rows += f'<input type="text" name="a_{qid}" placeholder="Your answer">'
+        rows += '</div>'
+
+    style = (
+        "<style>"
+        ".opt { display:inline-block; margin:4px 14px 4px 0; font-weight:400; }"
+        ".offer { font-weight:600; margin-bottom:8px; }"
+        ".btn-submit { margin-top:8px; padding:12px 20px; border:none; border-radius:8px;"
+        " background:#1a1a1a; color:#fff; font-size:15px; cursor:pointer; }"
+        "input[type=text], input[type=number] { margin-top:6px; }"
+        "</style>"
+    )
+
+    body = (
+        f'<div class="logo">Gracia Group</div>'
+        f'<h1>{deal_name}</h1>'
+        f'<p class="subtitle">A prospective buyer asked the questions below. Your answers go back to '
+        f'them; anything typed in a note field comes only to Gracia.</p>'
+        f'<form method="POST" action="{QA_SELF_URL}">'
+        f'<input type="hidden" name="qa" value="answer">'
+        f'<input type="hidden" name="deal_id" value="{deal_id}">'
+        f'<input type="hidden" name="set" value="{set_id}">'
+        f'<input type="hidden" name="token" value="{token}">'
+        f'{rows}'
+        f'<button type="submit" class="btn-submit">Send answers</button>'
+        f'</form>'
+    ) + style
+    return html_response(body)
+
+
 # ── Lambda entry point ────────────────────────────────────────────────────────
 
 def lambda_handler(event, context):
@@ -1351,6 +1453,8 @@ def lambda_handler(event, context):
 
     try:
         if method == "GET":
+            if qs.get("qa") == "answer":
+                return handle_qa_answer_page(qs)
             return handle_get(qs)
         elif method == "POST":
             return handle_post(body, qs)
