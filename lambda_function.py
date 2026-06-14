@@ -932,6 +932,9 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     if params.get("qa") == "submit":
         return handle_qa_submit(params)
 
+    if params.get("qa") == "answer":
+        return handle_qa_answer_submit(params)
+
     deal_id_str   = params.get("deal_id", "")
     submit_action = params.get("submit_action", "confirm")
 
@@ -1352,6 +1355,87 @@ def handle_qa_submit(params: dict) -> dict:
     )
 
     return success_page("Your questions have been sent to the counterparty.")
+
+
+def handle_qa_answer_submit(params: dict) -> dict:
+    """Seller submitted answers from the tokened answer page. Emails the public answers
+    back to the buyer, the full picture (including Gracia-only notes) to Chad, and
+    marks the S3 record answered."""
+    deal_id = params.get("deal_id", "")
+    set_id  = params.get("set", "")
+    token   = params.get("token", "")
+
+    if not (deal_id and set_id and token) or not verify_token(set_id, token):
+        return error_page("This link is invalid or has expired.")
+
+    s3 = boto3.client("s3", region_name="us-east-1")
+    try:
+        obj = s3.get_object(Bucket=QA_BUCKET, Key=f"{deal_id}/{set_id}.json")
+        record = json.loads(obj["Body"].read().decode())
+    except Exception:
+        return error_page("This request could not be found.")
+
+    deal_name    = record.get("deal_name", f"Deal {deal_id}")
+    buyer_email  = record.get("buyer_email", "")
+    buyer_name   = record.get("buyer_name", "")
+    seller_email = record.get("seller_email", "")
+
+    public_lines  = []
+    private_lines = []
+    answers = {}
+    for qid in record.get("question_ids", []):
+        qtext   = QA_TEXT.get(qid, qid)
+        a       = (params.get(f"a_{qid}", "") or "").strip()
+        counter = (params.get(f"c_{qid}", "") or "").strip()
+        note    = (params.get(f"o_{qid}", "") or "").strip()
+
+        answers[qid] = {"answer": a, "counter": counter, "note": note}
+
+        public_parts = []
+        if a:
+            public_parts.append(a)
+        if counter:
+            public_parts.append(f"counter: {counter}")
+        public_lines.append(f"- {qtext}\n    {'; '.join(public_parts) if public_parts else '(no response)'}")
+
+        private_parts = list(public_parts)
+        if note:
+            private_parts.append(f"note (Gracia only): {note}")
+        private_lines.append(f"- {qtext}\n    {'; '.join(private_parts) if private_parts else '(no response)'}")
+
+    record["status"]     = "answered"
+    record["answers"]    = answers
+    record["answered_at"] = datetime.now(timezone.utc).isoformat()
+    try:
+        s3.put_object(
+            Bucket=QA_BUCKET, Key=f"{deal_id}/{set_id}.json",
+            Body=json.dumps(record).encode(), ContentType="application/json",
+        )
+    except Exception as e:
+        logger.error(f"Failed to update QA record {deal_id}/{set_id}: {e}")
+
+    if buyer_email:
+        hello = f"Hi {buyer_name.split()[0]}," if buyer_name else "Hi,"
+        send_email(
+            buyer_email,
+            f"Answers on {deal_name}",
+            f"{hello}\n\nThe counterparty replied on {deal_name}:\n\n"
+            + "\n".join(public_lines)
+            + "\n\n— Gracia Group",
+        )
+
+    send_email(
+        CHAD_EMAIL,
+        f"Buyer Q&A answered: {deal_name} (#{deal_id})",
+        f"Seller answered the buyer Q&A on {deal_name} (deal {deal_id}).\n\n"
+        f"Buyer:  {buyer_name or '—'} <{buyer_email or '—'}>\n"
+        f"Seller: <{seller_email or '—'}>\n\n"
+        f"Answers (incl. Gracia-only notes):\n"
+        + "\n".join(private_lines)
+        + f"\n\nPipeline: https://app.pipelinecrm.com/deals/{deal_id}",
+    )
+
+    return success_page("Answers sent to the buyer.")
 
 
 def handle_qa_answer_page(qs: dict) -> dict:
