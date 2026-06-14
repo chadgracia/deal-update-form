@@ -1348,7 +1348,7 @@ def handle_qa_submit(params: dict) -> dict:
         f"Buyer Q&A: {deal_name} (#{deal_id})",
         f"New buyer Q&A on {deal_name} (deal {deal_id}).\n\n"
         f"Buyer: {buyer_name or '—'} <{buyer_email}>\n"
-        f"Seller emailed: {seller_email or 'NO EMAIL ON FILE — handle manually'}\n\n"
+        f"Seller: {seller_email or 'NO EMAIL ON FILE — handle manually'}\n\n"
         f"Questions:\n{q_block}\n\n"
         f"Seller's answer link: {answer_link}\n"
         f"Pipeline: https://app.pipelinecrm.com/deals/{deal_id}",
