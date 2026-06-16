@@ -1380,6 +1380,9 @@ def handle_qa_answer_submit(params: dict) -> dict:
     buyer_name   = record.get("buyer_name", "")
     seller_email = record.get("seller_email", "")
 
+    if record.get("status") == "answered":
+        return success_page("You've already answered these questions — thank you.")
+
     public_lines  = []
     private_lines = []
     answers = {}
@@ -1414,15 +1417,78 @@ def handle_qa_answer_submit(params: dict) -> dict:
     except Exception as e:
         logger.error(f"Failed to update QA record {deal_id}/{set_id}: {e}")
 
+    try:
+        jwt = get_jwt()
+        d_now = call_pipeline_api("GET", f"/deals/{deal_id}.json", jwt=jwt).get("data", {})
+        existing_summary = (d_now.get("summary") or "").strip()
+        stamp = datetime.now(timezone.utc).strftime("%b %d, %Y")
+        qa_block = f"Q&A ({stamp}):\n" + "\n".join(public_lines)
+        new_summary = (existing_summary + "\n\n" + qa_block) if existing_summary else qa_block
+        call_pipeline_api("PUT", f"/deals/{deal_id}.json",
+                          {"deal": {"summary": new_summary}}, jwt=jwt)
+    except Exception as e:
+        logger.error(f"QA summary append failed for {deal_id}: {e}")
+
     if buyer_email:
         hello = f"Hi {buyer_name.split()[0]}," if buyer_name else "Hi,"
-        send_email(
-            buyer_email,
-            f"Answers on {deal_name}",
+        deal_link = f"https://ewjul4gl75iopu3yfgxfbmvyoq0tlmqf.lambda-url.us-east-1.on.aws/?deal_id={deal_id}"
+        company = side = gross = mn = mx = sh = ""
+        try:
+            jwt = get_jwt()
+            d = call_pipeline_api("GET", f"/deals/{deal_id}.json", jwt=jwt).get("data", {})
+            cf = d.get("custom_fields", {}) or {}
+            company = (d.get("company") or {}).get("name", "")
+            side = "Sell" if is_sell(cf) else "Buy"
+            gross = fmt(parse_cf(cf, GROSS_FIELD))
+            mn = fmt(parse_cf(cf, MIN_SIZE_FIELD))
+            mx = fmt(parse_cf(cf, MAX_SIZE_FIELD))
+            sh = fmt(parse_cf(cf, SHARE_COUNT_FIELD))
+        except Exception as e:
+            logger.error(f"QA basics fetch failed for {deal_id}: {e}")
+
+        rows_html = ""
+        for qid in record.get("question_ids", []):
+            qtext = QA_TEXT.get(qid, qid)
+            ad = answers.get(qid, {})
+            parts = []
+            if ad.get("answer"):  parts.append(ad["answer"])
+            if ad.get("counter"): parts.append(f"counter: {ad['counter']}")
+            ans = "; ".join(parts) if parts else "(no response)"
+            rows_html += (
+                f'<tr><td style="padding:6px 10px;border-bottom:1px solid #eee;color:#374151;">{qtext}</td>'
+                f'<td style="padding:6px 10px;border-bottom:1px solid #eee;font-weight:600;color:#111;">{ans}</td></tr>'
+            )
+
+        details = []
+        if company: details.append(("Company", company))
+        if side:    details.append(("Side", side))
+        if gross:   details.append(("Price (gross)", f"${gross}"))
+        if mn or mx: details.append(("Size", f"${mn or '?'} - ${mx or '?'}"))
+        if sh:      details.append(("Shares", sh))
+        details_rows = "".join(
+            f'<tr><td style="padding:4px 10px;color:#6b7280;">{k}</td>'
+            f'<td style="padding:4px 10px;color:#111;">{v}</td></tr>'
+            for k, v in details
+        )
+
+        inner = (
+            f'<h2 style="margin:0 0 4px 0;font-size:18px;color:#111;">{deal_name}</h2>'
+            f'<p style="margin:0 0 16px 0;color:#4b5563;font-size:14px;">The counterparty replied to your questions:</p>'
+            f'<table style="border-collapse:collapse;width:100%;margin-bottom:18px;font-size:14px;">{rows_html}</table>'
+            f'<div style="font-weight:600;color:#1f2937;font-size:13px;margin-bottom:6px;">Deal details</div>'
+            f'<table style="border-collapse:collapse;width:100%;margin-bottom:18px;font-size:13px;">{details_rows}</table>'
+            f'<a href="{deal_link}" style="display:inline-block;padding:10px 18px;background:#1a1a1a;color:#ffffff;text-decoration:none;border-radius:6px;font-size:14px;">View the deal</a>'
+            f'<p style="margin:18px 0 0 0;color:#4b5563;font-size:13px;">To move forward, click <b>Bid</b> on the deal page to close, or contact Chad Gracia at '
+            f'<a href="mailto:cgracia@rainmakersecurities.com">cgracia@rainmakersecurities.com</a>.</p>'
+        )
+        plain = (
             f"{hello}\n\nThe counterparty replied on {deal_name}:\n\n"
             + "\n".join(public_lines)
-            + "\n\n— Gracia Group",
+            + f"\n\nView the deal: {deal_link}"
+            + "\n\nTo move forward, click Bid on the deal page to close, "
+              "or contact Chad Gracia at cgracia@rainmakersecurities.com."
         )
+        send_email(buyer_email, f"Answers on {deal_name}", plain, html=email_html(inner))
 
     send_email(
         CHAD_EMAIL,
@@ -1453,6 +1519,14 @@ def handle_qa_answer_page(qs: dict) -> dict:
         record = json.loads(obj["Body"].read().decode())
     except Exception:
         return error_page("This request could not be found.")
+
+    if record.get("status") == "answered":
+        return html_response(
+            '<div class="logo">Gracia Group</div>'
+            '<h1>Already answered</h1>'
+            '<p class="subtitle">You\'ve already answered these questions — thank you. '
+            'Gracia has been notified and will follow up if anything else is needed.</p>'
+        )
 
     deal_name  = record.get("deal_name", f"Deal {deal_id}")
     bid_amount = record.get("bid_amount", "")
