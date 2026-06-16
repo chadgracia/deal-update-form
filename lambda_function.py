@@ -1358,9 +1358,9 @@ def handle_qa_submit(params: dict) -> dict:
 
 
 def handle_qa_answer_submit(params: dict) -> dict:
-    """Seller submitted answers from the tokened answer page. Emails the public answers
-    back to the buyer, the full picture (including Gracia-only notes) to Chad, and
-    marks the S3 record answered."""
+    """Seller submitted answers. Appends public answers to the deal SUMMARY, emails the
+    buyer (public) and Chad (full, incl. Gracia-only notes) as rich HTML, marks answered,
+    ignores repeat submits."""
     deal_id = params.get("deal_id", "")
     set_id  = params.get("set", "")
     token   = params.get("token", "")
@@ -1375,131 +1375,122 @@ def handle_qa_answer_submit(params: dict) -> dict:
     except Exception:
         return error_page("This request could not be found.")
 
+    if record.get("status") == "answered":
+        return success_page("You've already answered these questions — thank you.")
+
     deal_name    = record.get("deal_name", f"Deal {deal_id}")
     buyer_email  = record.get("buyer_email", "")
     buyer_name   = record.get("buyer_name", "")
     seller_email = record.get("seller_email", "")
 
-    if record.get("status") == "answered":
-        return success_page("You've already answered these questions — thank you.")
-
-    public_lines  = []
-    private_lines = []
-    answers = {}
+    answers, public_lines, priv_lines = {}, [], []
     for qid in record.get("question_ids", []):
-        qtext   = QA_TEXT.get(qid, qid)
         a       = (params.get(f"a_{qid}", "") or "").strip()
         counter = (params.get(f"c_{qid}", "") or "").strip()
         note    = (params.get(f"o_{qid}", "") or "").strip()
-
         answers[qid] = {"answer": a, "counter": counter, "note": note}
+        pub = []
+        if a: pub.append(a)
+        if counter: pub.append(f"counter: {counter}")
+        public_lines.append(f"- {QA_TEXT.get(qid, qid)}\n    {'; '.join(pub) if pub else '(no response)'}")
+        prv = list(pub)
+        if note: prv.append(f"note (Gracia only): {note}")
+        priv_lines.append(f"- {QA_TEXT.get(qid, qid)}\n    {'; '.join(prv) if prv else '(no response)'}")
 
-        public_parts = []
-        if a:
-            public_parts.append(a)
-        if counter:
-            public_parts.append(f"counter: {counter}")
-        public_lines.append(f"- {qtext}\n    {'; '.join(public_parts) if public_parts else '(no response)'}")
-
-        private_parts = list(public_parts)
-        if note:
-            private_parts.append(f"note (Gracia only): {note}")
-        private_lines.append(f"- {qtext}\n    {'; '.join(private_parts) if private_parts else '(no response)'}")
-
-    record["status"]     = "answered"
-    record["answers"]    = answers
+    record["status"], record["answers"] = "answered", answers
     record["answered_at"] = datetime.now(timezone.utc).isoformat()
     try:
-        s3.put_object(
-            Bucket=QA_BUCKET, Key=f"{deal_id}/{set_id}.json",
-            Body=json.dumps(record).encode(), ContentType="application/json",
-        )
+        s3.put_object(Bucket=QA_BUCKET, Key=f"{deal_id}/{set_id}.json",
+                      Body=json.dumps(record).encode(), ContentType="application/json")
     except Exception as e:
         logger.error(f"Failed to update QA record {deal_id}/{set_id}: {e}")
 
+    deal_link     = f"https://ewjul4gl75iopu3yfgxfbmvyoq0tlmqf.lambda-url.us-east-1.on.aws/?deal_id={deal_id}"
+    pipeline_link = f"https://app.pipelinecrm.com/deals/{deal_id}"
+    company = side = gross = mn = mx = sh = ""
     try:
         jwt = get_jwt()
-        d_now = call_pipeline_api("GET", f"/deals/{deal_id}.json", jwt=jwt).get("data", {})
-        existing_summary = (d_now.get("summary") or "").strip()
+        d  = call_pipeline_api("GET", f"/deals/{deal_id}.json", jwt=jwt).get("data", {})
+        cf = d.get("custom_fields", {}) or {}
+        company = (d.get("company") or {}).get("name", "")
+        side    = "Sell" if is_sell(cf) else "Buy"
+        gross   = fmt(parse_cf(cf, GROSS_FIELD))
+        mn      = fmt(parse_cf(cf, MIN_SIZE_FIELD))
+        mx      = fmt(parse_cf(cf, MAX_SIZE_FIELD))
+        sh      = fmt(parse_cf(cf, SHARE_COUNT_FIELD))
+        existing_summary = (d.get("summary") or "").strip()
         stamp = datetime.now(timezone.utc).strftime("%b %d, %Y")
         qa_block = f"Q&A ({stamp}):\n" + "\n".join(public_lines)
         new_summary = (existing_summary + "\n\n" + qa_block) if existing_summary else qa_block
-        call_pipeline_api("PUT", f"/deals/{deal_id}.json",
-                          {"deal": {"summary": new_summary}}, jwt=jwt)
+        call_pipeline_api("PUT", f"/deals/{deal_id}.json", {"deal": {"summary": new_summary}}, jwt=jwt)
     except Exception as e:
-        logger.error(f"QA summary append failed for {deal_id}: {e}")
+        logger.error(f"QA deal fetch/summary failed for {deal_id}: {e}")
 
-    if buyer_email:
-        hello = f"Hi {buyer_name.split()[0]}," if buyer_name else "Hi,"
-        deal_link = f"https://ewjul4gl75iopu3yfgxfbmvyoq0tlmqf.lambda-url.us-east-1.on.aws/?deal_id={deal_id}"
-        company = side = gross = mn = mx = sh = ""
-        try:
-            jwt = get_jwt()
-            d = call_pipeline_api("GET", f"/deals/{deal_id}.json", jwt=jwt).get("data", {})
-            cf = d.get("custom_fields", {}) or {}
-            company = (d.get("company") or {}).get("name", "")
-            side = "Sell" if is_sell(cf) else "Buy"
-            gross = fmt(parse_cf(cf, GROSS_FIELD))
-            mn = fmt(parse_cf(cf, MIN_SIZE_FIELD))
-            mx = fmt(parse_cf(cf, MAX_SIZE_FIELD))
-            sh = fmt(parse_cf(cf, SHARE_COUNT_FIELD))
-        except Exception as e:
-            logger.error(f"QA basics fetch failed for {deal_id}: {e}")
+    details = []
+    if company: details.append(("Company", company))
+    if side:    details.append(("Side", side))
+    if gross:   details.append(("Price (gross)", f"${gross}"))
+    if mn or mx: details.append(("Size", f"${mn or '?'} - ${mx or '?'}"))
+    if sh:      details.append(("Shares", sh))
+    details_rows = "".join(
+        f'<tr><td style="padding:4px 10px;color:#6b7280;">{k}</td>'
+        f'<td style="padding:4px 10px;color:#111;">{v}</td></tr>' for k, v in details
+    )
+    details_html = (
+        '<div style="font-weight:600;color:#1f2937;font-size:13px;margin-bottom:6px;">Deal details</div>'
+        f'<table style="border-collapse:collapse;width:100%;margin-bottom:18px;font-size:13px;">{details_rows}</table>'
+    )
 
-        rows_html = ""
+    def qa_rows(include_notes):
+        out = ""
         for qid in record.get("question_ids", []):
-            qtext = QA_TEXT.get(qid, qid)
             ad = answers.get(qid, {})
             parts = []
             if ad.get("answer"):  parts.append(ad["answer"])
             if ad.get("counter"): parts.append(f"counter: {ad['counter']}")
+            if include_notes and ad.get("note"):
+                parts.append(f'<span style="color:#b45309;">note (Gracia only): {ad["note"]}</span>')
             ans = "; ".join(parts) if parts else "(no response)"
-            rows_html += (
-                f'<tr><td style="padding:6px 10px;border-bottom:1px solid #eee;color:#374151;">{qtext}</td>'
+            out += (
+                f'<tr><td style="padding:6px 10px;border-bottom:1px solid #eee;color:#374151;">{QA_TEXT.get(qid, qid)}</td>'
                 f'<td style="padding:6px 10px;border-bottom:1px solid #eee;font-weight:600;color:#111;">{ans}</td></tr>'
             )
+        return out
 
-        details = []
-        if company: details.append(("Company", company))
-        if side:    details.append(("Side", side))
-        if gross:   details.append(("Price (gross)", f"${gross}"))
-        if mn or mx: details.append(("Size", f"${mn or '?'} - ${mx or '?'}"))
-        if sh:      details.append(("Shares", sh))
-        details_rows = "".join(
-            f'<tr><td style="padding:4px 10px;color:#6b7280;">{k}</td>'
-            f'<td style="padding:4px 10px;color:#111;">{v}</td></tr>'
-            for k, v in details
-        )
-
+    if buyer_email:
+        hello = f"Hi {buyer_name.split()[0]}," if buyer_name else "Hi,"
         inner = (
             f'<h2 style="margin:0 0 4px 0;font-size:18px;color:#111;">{deal_name}</h2>'
-            f'<p style="margin:0 0 16px 0;color:#4b5563;font-size:14px;">The counterparty replied to your questions:</p>'
-            f'<table style="border-collapse:collapse;width:100%;margin-bottom:18px;font-size:14px;">{rows_html}</table>'
-            f'<div style="font-weight:600;color:#1f2937;font-size:13px;margin-bottom:6px;">Deal details</div>'
-            f'<table style="border-collapse:collapse;width:100%;margin-bottom:18px;font-size:13px;">{details_rows}</table>'
+            '<p style="margin:0 0 16px 0;color:#4b5563;font-size:14px;">The counterparty replied to your questions:</p>'
+            f'<table style="border-collapse:collapse;width:100%;margin-bottom:18px;font-size:14px;">{qa_rows(False)}</table>'
+            f'{details_html}'
             f'<a href="{deal_link}" style="display:inline-block;padding:10px 18px;background:#1a1a1a;color:#ffffff;text-decoration:none;border-radius:6px;font-size:14px;">View the deal</a>'
-            f'<p style="margin:18px 0 0 0;color:#4b5563;font-size:13px;">To move forward, click <b>Bid</b> on the deal page to close, or contact Chad Gracia at '
-            f'<a href="mailto:cgracia@rainmakersecurities.com">cgracia@rainmakersecurities.com</a>.</p>'
+            '<p style="margin:18px 0 0 0;color:#4b5563;font-size:13px;">To move forward, click <b>Bid</b> on the deal page to close, or contact Chad Gracia at '
+            '<a href="mailto:cgracia@rainmakersecurities.com">cgracia@rainmakersecurities.com</a>.</p>'
         )
-        plain = (
-            f"{hello}\n\nThe counterparty replied on {deal_name}:\n\n"
-            + "\n".join(public_lines)
-            + f"\n\nView the deal: {deal_link}"
-            + "\n\nTo move forward, click Bid on the deal page to close, "
-              "or contact Chad Gracia at cgracia@rainmakersecurities.com."
-        )
+        plain = (f"{hello}\n\nThe counterparty replied on {deal_name}:\n\n" + "\n".join(public_lines)
+                 + f"\n\nView the deal: {deal_link}\n\nTo move forward, click Bid on the deal page to close, "
+                   "or contact Chad Gracia at cgracia@rainmakersecurities.com.")
         send_email(buyer_email, f"Answers on {deal_name}", plain, html=email_html(inner))
 
-    send_email(
-        CHAD_EMAIL,
-        f"Buyer Q&A answered: {deal_name} (#{deal_id})",
-        f"Seller answered the buyer Q&A on {deal_name} (deal {deal_id}).\n\n"
-        f"Buyer:  {buyer_name or '—'} <{buyer_email or '—'}>\n"
-        f"Seller: <{seller_email or '—'}>\n\n"
-        f"Answers (incl. Gracia-only notes):\n"
-        + "\n".join(private_lines)
-        + f"\n\nPipeline: https://app.pipelinecrm.com/deals/{deal_id}",
+    chad_inner = (
+        f'<h2 style="margin:0 0 4px 0;font-size:18px;color:#111;">{deal_name}</h2>'
+        f'<p style="margin:0 0 14px 0;color:#4b5563;font-size:14px;">Seller answered the buyer Q&amp;A (deal {deal_id}).</p>'
+        '<table style="border-collapse:collapse;width:100%;margin-bottom:14px;font-size:13px;">'
+        f'<tr><td style="padding:4px 10px;color:#6b7280;">Buyer</td><td style="padding:4px 10px;color:#111;">{buyer_name or "—"} &lt;{buyer_email or "—"}&gt;</td></tr>'
+        f'<tr><td style="padding:4px 10px;color:#6b7280;">Seller</td><td style="padding:4px 10px;color:#111;">&lt;{seller_email or "—"}&gt;</td></tr>'
+        '</table>'
+        f'<table style="border-collapse:collapse;width:100%;margin-bottom:18px;font-size:14px;">{qa_rows(True)}</table>'
+        f'{details_html}'
+        f'<a href="{deal_link}" style="display:inline-block;padding:9px 16px;background:#1a1a1a;color:#ffffff;text-decoration:none;border-radius:6px;font-size:13px;margin-right:8px;">Deal page</a>'
+        f'<a href="{pipeline_link}" style="display:inline-block;padding:9px 16px;background:#374151;color:#ffffff;text-decoration:none;border-radius:6px;font-size:13px;">Pipeline</a>'
     )
+    chad_plain = (
+        f"Seller answered the buyer Q&A on {deal_name} (deal {deal_id}).\n\n"
+        f"Buyer: {buyer_name or '—'} <{buyer_email or '—'}>\nSeller: <{seller_email or '—'}>\n\n"
+        + "\n".join(priv_lines) + f"\n\nDeal: {deal_link}\nPipeline: {pipeline_link}"
+    )
+    send_email(CHAD_EMAIL, f"Buyer Q&A answered: {deal_name} (#{deal_id})", chad_plain, html=email_html(chad_inner))
 
     return success_page("Answers sent to the buyer.")
 
