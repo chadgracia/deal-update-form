@@ -1298,6 +1298,22 @@ def handle_qa_submit(params: dict) -> dict:
     bid_amount = (params.get("bid_amount", "") or "").strip()
     bid_size   = (params.get("bid_size", "") or "").strip()
 
+    # Send-once guard: identical (deal, buyer, question set) submissions take an atomic
+    # S3 lock via conditional write. A double-click loses the race and short-circuits.
+    digest = hashlib.sha256(
+        f"{deal_id}|{buyer_email.strip().lower()}|{','.join(sorted(selected))}".encode()
+    ).hexdigest()
+    lock_key = f"questions-sent/{deal_id}/{digest}.lock"
+    s3 = boto3.client("s3", region_name="us-east-1")
+    try:
+        s3.put_object(Bucket=QA_BUCKET, Key=lock_key, Body=b"", IfNoneMatch="*")
+    except s3.exceptions.ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        if code in ("PreconditionFailed", "412") or status == 412:
+            return success_page("Your questions have been sent to the counterparty.")
+        raise
+
     jwt = get_jwt()
     deal = call_pipeline_api("GET", f"/deals/{deal_id}.json", jwt=jwt)
     deal_data = deal.get("data", {}) if isinstance(deal, dict) else {}
@@ -1320,39 +1336,46 @@ def handle_qa_submit(params: dict) -> dict:
         "seller_email": seller_email, "status": "pending",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    boto3.client("s3", region_name="us-east-1").put_object(
-        Bucket=QA_BUCKET, Key=f"{deal_id}/{set_id}.json",
-        Body=json.dumps(record).encode(), ContentType="application/json",
-    )
-
-    def q_line(qid):
-        if qid == "accept_bid" and bid_amount:
-            size_txt = f" for {bid_size}" if bid_size else ""
-            return f"- Would you accept a bid of {bid_amount}/share{size_txt}?"
-        return f"- {QA_TEXT.get(qid, qid)}"
-    q_block = "\n".join(q_line(q) for q in selected)
-
-    answer_link = f"{QA_SELF_URL}?qa=answer&deal_id={deal_id}&set={set_id}&token={make_token(set_id)}"
-
-    if seller_email:
-        hello = f"Hi {seller_first}," if seller_first else "Hi,"
-        send_email(
-            seller_email,
-            f"A buyer is interested in {deal_name} — quick questions",
-            f"{hello}\n\nA prospective buyer is interested in {deal_name} and asked:\n\n"
-            f"{q_block}\n\nYou can answer in a few taps here:\n{answer_link}\n\n— Gracia Group",
+    try:
+        s3.put_object(
+            Bucket=QA_BUCKET, Key=f"{deal_id}/{set_id}.json",
+            Body=json.dumps(record).encode(), ContentType="application/json",
         )
 
-    send_email(
-        CHAD_EMAIL,
-        f"Buyer Q&A: {deal_name} (#{deal_id})",
-        f"New buyer Q&A on {deal_name} (deal {deal_id}).\n\n"
-        f"Buyer: {buyer_name or '—'} <{buyer_email}>\n"
-        f"Seller: {seller_email or 'NO EMAIL ON FILE — handle manually'}\n\n"
-        f"Questions:\n{q_block}\n\n"
-        f"Seller's answer link: {answer_link}\n"
-        f"Pipeline: https://app.pipelinecrm.com/deals/{deal_id}",
-    )
+        def q_line(qid):
+            if qid == "accept_bid" and bid_amount:
+                size_txt = f" for {bid_size}" if bid_size else ""
+                return f"- Would you accept a bid of {bid_amount}/share{size_txt}?"
+            return f"- {QA_TEXT.get(qid, qid)}"
+        q_block = "\n".join(q_line(q) for q in selected)
+
+        answer_link = f"{QA_SELF_URL}?qa=answer&deal_id={deal_id}&set={set_id}&token={make_token(set_id)}"
+
+        if seller_email:
+            hello = f"Hi {seller_first}," if seller_first else "Hi,"
+            send_email(
+                seller_email,
+                f"A buyer is interested in {deal_name} — quick questions",
+                f"{hello}\n\nA prospective buyer is interested in {deal_name} and asked:\n\n"
+                f"{q_block}\n\nYou can answer in a few taps here:\n{answer_link}\n\n— Gracia Group",
+            )
+
+        send_email(
+            CHAD_EMAIL,
+            f"Buyer Q&A: {deal_name} (#{deal_id})",
+            f"New buyer Q&A on {deal_name} (deal {deal_id}).\n\n"
+            f"Buyer: {buyer_name or '—'} <{buyer_email}>\n"
+            f"Seller: {seller_email or 'NO EMAIL ON FILE — handle manually'}\n\n"
+            f"Questions:\n{q_block}\n\n"
+            f"Seller's answer link: {answer_link}\n"
+            f"Pipeline: https://app.pipelinecrm.com/deals/{deal_id}",
+        )
+    except Exception:
+        try:
+            s3.delete_object(Bucket=QA_BUCKET, Key=lock_key)
+        except Exception as del_e:
+            logger.error(f"Failed to release send-once lock {lock_key}: {del_e}")
+        raise
 
     return success_page("Your questions have been sent to the counterparty.")
 
