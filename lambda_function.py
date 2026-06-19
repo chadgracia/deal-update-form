@@ -79,6 +79,7 @@ MIN_SIZE_FIELD    = "custom_label_3065488"
 MAX_SIZE_FIELD    = "custom_label_3064645"
 MGMT_FEE_FIELD    = "custom_label_3940558"
 CARRY_FIELD       = "custom_label_3940559"
+SELLER_FEE_FIELD  = "custom_label_3940560"
 SHARE_COUNT_FIELD = "custom_label_3070843"
 REFRESH_FIELD     = "custom_label_3994687"
 DEAL_TYPE_FIELD   = "custom_label_1958"
@@ -421,6 +422,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
     max_val      = fmt_input(parse_cf(cf, MAX_SIZE_FIELD))
     mgmt_fee_val = fmt_input(parse_cf(cf, MGMT_FEE_FIELD))
     carry_val    = fmt_input(parse_cf(cf, CARRY_FIELD))
+    seller_fee_val = fmt_input(parse_cf(cf, SELLER_FEE_FIELD))
     share_val    = fmt_input(parse_cf(cf, SHARE_COUNT_FIELD))
 
     # Detect SPV structure
@@ -506,9 +508,13 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
           <label>Management Fee (%)</label>
           <input type="number" name="mgmt_fee" value="{mgmt_fee_val}" step="0.1" placeholder="e.g. 2">
         </div>
-        <div class="field" style="margin-bottom:0">
+        <div class="field" style="margin-bottom:12px">
           <label>Carry (%)</label>
           <input type="number" name="carry" value="{carry_val}" step="0.1" placeholder="e.g. 20">
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <label>Instead of man. fee / carry, would you accept an up front fee of (%):</label>
+          <input type="number" name="seller_fee" value="{seller_fee_val}" step="0.1" placeholder="e.g. 5">
         </div>
       </div>'''
 
@@ -989,6 +995,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     min_val      = params.get("min_size", "").strip().replace(",", "")
     mgmt_fee_val = params.get("mgmt_fee", "").strip()
     carry_val    = params.get("carry", "").strip()
+    seller_fee_val = params.get("seller_fee", "").strip()
     comments     = params.get("comments", "").strip()
 
     sell       = is_sell(current_cf)
@@ -1026,6 +1033,9 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         except ValueError: pass
     if carry_val:
         try: custom[CARRY_FIELD] = float(carry_val)
+        except ValueError: pass
+    if seller_fee_val:
+        try: custom[SELLER_FEE_FIELD] = float(seller_fee_val)
         except ValueError: pass
 
     # Sell-side: write estimated gross so CRM has both sides for downstream consumers.
@@ -1169,6 +1179,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         ("Max size",    fmt_email(parse_cf(current_cf, MAX_SIZE_FIELD)),    fmt_email(new_max if new_max is not None else parse_cf(current_cf, MAX_SIZE_FIELD))),
         ("Mgmt fee",    fmt_email(parse_cf(current_cf, MGMT_FEE_FIELD)),    fmt_email(mgmt_fee_val or parse_cf(current_cf, MGMT_FEE_FIELD))),
         ("Carry",       fmt_email(parse_cf(current_cf, CARRY_FIELD)),       fmt_email(carry_val or parse_cf(current_cf, CARRY_FIELD))),
+        ("Upfront fee", fmt_email(parse_cf(current_cf, SELLER_FEE_FIELD)),  fmt_email(seller_fee_val or parse_cf(current_cf, SELLER_FEE_FIELD))),
         ("Stage",       old_stage, new_stage_name),
     ]
 
