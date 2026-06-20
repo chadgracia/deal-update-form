@@ -772,6 +772,8 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
             except (ValueError, TypeError):
                 pass
 
+    summary_current = (deal.get("summary") or "").strip()
+    summary_display = summary_current if summary_current else "No public notes on file yet."
     form_html = f"""
     <h1>{side} Order: {company}</h1>
     <p class="subtitle">Hello{f" {contact_name.split()[0]}" if contact_name else ""}! Please review and update your deal details below.</p>
@@ -799,8 +801,14 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
       </div>
 
       <div class="field">
-        <label>Comments (optional)</label>
-        <input type="text" name="comments" placeholder="Any notes for the team...">
+        <label>Current Public Notes</label>
+        <div style="background:#f7f7f7;border:1px solid var(--line);border-radius:9px;padding:12px 14px;font-size:13px;color:#666;white-space:pre-wrap;line-height:1.5;">{summary_display}</div>
+      </div>
+
+      <div class="field">
+        <label>Notes</label>
+        <p style="font-size:12px;color:#888;margin:-2px 0 6px 0;">See anything to add or correct above? Tell us here and we'll review and update the public notes.</p>
+        <input type="text" name="comments" placeholder="e.g. The PIK note is outdated — it's shares now.">
       </div>
 
       {spv_fields_html}
@@ -1205,7 +1213,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     if sell and eff_net:
         email_lines.append(f"(Estimated gross = net × 1.05 = ${eff_net * 1.05:,.2f}/share)")
     if comments:
-        email_lines += ["", f"Client note: {comments}"]
+        email_lines += ["", f"Client note (may need a public-notes update): {comments}"]
     email_lines += ["", "Refresh reset to 60 days."]
 
     # HTML body
