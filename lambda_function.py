@@ -1331,13 +1331,21 @@ def handle_qa_submit(params: dict) -> dict:
     deal_name = deal_data.get("name", f"Deal {deal_id}")
     contact_id = (deal_data.get("primary_contact") or {}).get("id", 0)
 
+    cf            = deal_data.get("custom_fields", {}) or {}
+    sell_deal     = is_sell(cf)
+    asker_role    = "buyer"  if sell_deal else "seller"
+    answerer_role = "seller" if sell_deal else "buyer"
+
     seller_email = ""
     seller_first = ""
+    seller_full  = ""
     if contact_id:
         p = call_pipeline_api("GET", f"/people/{contact_id}.json", jwt=jwt)
         person = p.get("data", {}) if isinstance(p, dict) else {}
         seller_email = (person.get("email") or "").strip()
         seller_first = (person.get("first_name") or "").strip()
+        seller_last  = (person.get("last_name") or "").strip()
+        seller_full  = (person.get("full_name") or f"{seller_first} {seller_last}").strip()
 
     set_id = base64.urlsafe_b64encode(os.urandom(12)).decode().rstrip("=")
     record = {
@@ -1355,8 +1363,10 @@ def handle_qa_submit(params: dict) -> dict:
 
         def q_line(qid):
             if qid == "accept_bid" and bid_amount:
-                size_txt = f" for {bid_size}" if bid_size else ""
-                return f"- Would you accept a bid of {bid_amount}/share{size_txt}?"
+                size_txt = f" for ${bid_size}" if bid_size else ""
+                if sell_deal:
+                    return f"- Would you accept a bid of ${bid_amount}/share (gross){size_txt}?"
+                return f"- Would you bid ${bid_amount}/share (gross){size_txt}?"
             return f"- {QA_TEXT.get(qid, qid)}"
         q_block = "\n".join(q_line(q) for q in selected)
 
@@ -1366,19 +1376,23 @@ def handle_qa_submit(params: dict) -> dict:
             hello = f"Hi {seller_first}," if seller_first else "Hi,"
             send_email(
                 seller_email,
-                f"A buyer is interested in {deal_name} — quick questions",
-                f"{hello}\n\nA prospective buyer is interested in {deal_name} and asked:\n\n"
+                f"A prospective {asker_role} is interested in {deal_name} — quick questions",
+                f"{hello}\n\nA prospective {asker_role} is interested in {deal_name} and asked:\n\n"
                 f"{q_block}\n\nYou can answer in a few taps here:\n{answer_link}\n\n— Gracia Group",
             )
+
+        asker_name    = buyer_name or buyer_email
+        answerer_name = seller_full or seller_email or "—"
+        attribution   = f"{asker_role.title()} {asker_name} ({buyer_email}) asks {answerer_role.title()} {answerer_name}:"
+        seller_note   = "" if seller_email else "\n(Counterparty has NO EMAIL ON FILE — handle manually.)\n"
 
         send_email(
             CHAD_EMAIL,
             f"Buyer Q&A: {deal_name} (#{deal_id})",
             f"New buyer Q&A on {deal_name} (deal {deal_id}).\n\n"
-            f"Buyer: {buyer_name or '—'} <{buyer_email}>\n"
-            f"Seller: {seller_email or 'NO EMAIL ON FILE — handle manually'}\n\n"
-            f"Questions:\n{q_block}\n\n"
-            f"Seller's answer link: {answer_link}\n"
+            f"{attribution}{seller_note}\n"
+            f"{q_block}\n\n"
+            f"Counterparty answer link: {answer_link}\n"
             f"Pipeline: https://app.pipelinecrm.com/deals/{deal_id}",
         )
     except Exception:
