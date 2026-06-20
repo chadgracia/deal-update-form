@@ -485,11 +485,11 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
                     rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #eee"><span style="color:#888">Your price vs last round</span><span style="font-weight:500">{abs(disc):.1f}% {sign}</span></div>')
             except (ValueError, TypeError):
                 pass
-        if lr_val:
+        hiive_ref = parse_cf(ccf, HIIVE_BID_FIELD) if sell else parse_cf(ccf, HIIVE_ASK_FIELD)
+        if hiive_ref:
             try:
-                val_f = float(lr_val)  # stored in billions decimal (e.g. 7.6 = $7.6B)
-                val_str = f"${val_f:.1f}B"
-                rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0"><span style="color:#888">Last round valuation</span><span style="font-weight:500">{val_str}</span></div>')
+                hiive_ref_f = float(str(hiive_ref).replace(",", "."))
+                rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0"><span style="color:#888">Approximate market price</span><span style="font-weight:500">${hiive_ref_f:,.2f}/share</span></div>')
             except (ValueError, TypeError):
                 pass
         if rows:
