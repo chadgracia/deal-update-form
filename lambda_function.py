@@ -751,7 +751,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
             try:
                 hiive_price = float(str(hiive_bid).replace(",", "."))
                 hiive_btn_html = f"""
-        <button type="submit" name="submit_action" value="confirm"
+        <button type="button"
           onclick="document.querySelector('[name={price_field}]').value='{hiive_price}'"
           style="width:100%;margin-bottom:10px;background:#e8f4e8;color:#2a6a2a;border:1px solid #a8d4a8;
                  border-radius:8px;padding:11px;font-size:14px;font-weight:600;cursor:pointer;">
@@ -763,7 +763,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
             try:
                 hiive_price = float(str(hiive_ask).replace(",", "."))
                 hiive_btn_html = f"""
-        <button type="submit" name="submit_action" value="confirm"
+        <button type="button"
           onclick="document.querySelector('[name={price_field}]').value='{hiive_price}'"
           style="width:100%;margin-bottom:10px;background:#e8f4e8;color:#2a6a2a;border:1px solid #a8d4a8;
                  border-radius:8px;padding:11px;font-size:14px;font-weight:600;cursor:pointer;">
