@@ -808,7 +808,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
       <div class="field">
         <label>Notes</label>
         <p style="font-size:12px;color:#888;margin:-2px 0 6px 0;">See anything to add or correct above? Tell us here and we'll review and update the public notes.</p>
-        <input type="text" name="comments" placeholder="e.g. The PIK note is outdated — it's shares now.">
+        <input type="text" name="comments" placeholder="">
       </div>
 
       {spv_fields_html}
