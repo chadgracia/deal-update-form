@@ -47,7 +47,7 @@ QA_TEXT = {
     "qp_accredited":"Are you a QP or accredited?",
     "iqf_done":     "Have you completed the IQF with Rainmaker?",
     "on_cap_table": "Are you already on the cap table?",
-    "no_data_room": "Do you require a Data Room (VDR)?",
+    "no_data_room": "Do you need access to a data room to commit?",
     "accept_common":"Would you accept common shares?",
     "move_bid_up":  "Would you move your bid up?",
 }
