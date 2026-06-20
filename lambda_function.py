@@ -1149,6 +1149,15 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
             return f"${millions:.1f}M"
         return f"${rounded_k}K"
 
+    def fmt_pct(val):
+        if val is None or val == "":
+            return "—"
+        try:
+            f = float(str(val).replace(",", "."))
+            return f"{int(f)}%" if f == int(f) else f"{f:g}%"
+        except Exception:
+            return str(val)
+
     side = "Sell" if is_sell(current_cf) else "Buy"
     deal_name = current_deal.get("name", f"{side} Order: {company}")
 
@@ -1185,9 +1194,9 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         ("Shares",      fmt_count(parse_cf(current_cf, SHARE_COUNT_FIELD)), fmt_count(new_shares if new_shares is not None else parse_cf(current_cf, SHARE_COUNT_FIELD))),
         ("Min size",    fmt_email(parse_cf(current_cf, MIN_SIZE_FIELD)),    fmt_email(min_val or parse_cf(current_cf, MIN_SIZE_FIELD))),
         ("Max size",    fmt_email(parse_cf(current_cf, MAX_SIZE_FIELD)),    fmt_email(new_max if new_max is not None else parse_cf(current_cf, MAX_SIZE_FIELD))),
-        ("Mgmt fee",    fmt_email(parse_cf(current_cf, MGMT_FEE_FIELD)),    fmt_email(mgmt_fee_val or parse_cf(current_cf, MGMT_FEE_FIELD))),
-        ("Carry",       fmt_email(parse_cf(current_cf, CARRY_FIELD)),       fmt_email(carry_val or parse_cf(current_cf, CARRY_FIELD))),
-        ("Upfront fee", fmt_email(parse_cf(current_cf, SELLER_FEE_FIELD)),  fmt_email(seller_fee_val or parse_cf(current_cf, SELLER_FEE_FIELD))),
+        ("Mgmt fee",    fmt_pct(parse_cf(current_cf, MGMT_FEE_FIELD)),    fmt_pct(mgmt_fee_val or parse_cf(current_cf, MGMT_FEE_FIELD))),
+        ("Carry",       fmt_pct(parse_cf(current_cf, CARRY_FIELD)),       fmt_pct(carry_val or parse_cf(current_cf, CARRY_FIELD))),
+        ("Upfront fee", fmt_pct(parse_cf(current_cf, SELLER_FEE_FIELD)),  fmt_pct(seller_fee_val or parse_cf(current_cf, SELLER_FEE_FIELD))),
         ("Stage",       old_stage, new_stage_name),
     ]
 
