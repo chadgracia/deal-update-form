@@ -513,7 +513,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
           <input type="number" name="carry" value="{carry_val}" step="0.1" placeholder="e.g. 20">
         </div>
         <div class="field" style="margin-bottom:0">
-          <label>Instead of man. fee / carry, would you accept an up front fee of (%):</label>
+          <label>One-Time Fee (%)</label>
           <input type="number" name="seller_fee" value="{seller_fee_val}" step="0.1" placeholder="e.g. 5">
         </div>
       </div>'''
