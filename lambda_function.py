@@ -486,10 +486,12 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
             except (ValueError, TypeError):
                 pass
         hiive_ref = parse_cf(ccf, HIIVE_BID_FIELD) if sell else parse_cf(ccf, HIIVE_ASK_FIELD)
-        if hiive_ref:
+        if hiive_ref and is_direct:
             try:
-                hiive_ref_f = float(str(hiive_ref).replace(",", "."))
-                rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0"><span style="color:#888">Approximate market price</span><span style="font-weight:500">${hiive_ref_f:,.2f}/share</span></div>')
+                hiive_ref_f = round(float(str(hiive_ref).replace(",", ".")))
+                _ref_ok = deal_price is None or (hiive_ref_f < deal_price if sell else hiive_ref_f > deal_price)
+                if _ref_ok:
+                    rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0"><span style="color:#888">Approximate market price</span><span style="font-weight:500">${hiive_ref_f:,}/share</span></div>')
             except (ValueError, TypeError):
                 pass
         if rows:
@@ -749,25 +751,27 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
     if is_direct:
         if sell and hiive_bid:
             try:
-                hiive_price = float(str(hiive_bid).replace(",", "."))
-                hiive_btn_html = f"""
+                hiive_price = round(float(str(hiive_bid).replace(",", ".")))
+                if existing_price is None or hiive_price < existing_price:
+                    hiive_btn_html = f"""
         <button type="button"
           onclick="document.querySelector('[name={price_field}]').value='{hiive_price}'"
           style="width:100%;margin-bottom:10px;background:#e8f4e8;color:#2a6a2a;border:1px solid #a8d4a8;
                  border-radius:8px;padding:11px;font-size:14px;font-weight:600;cursor:pointer;">
-          ⚡ Match Best Bid: ${hiive_price:,.2f}/share (before commission)
+          ⚡ Match Best Bid: ${hiive_price:,}/share (before commission)
         </button>"""
             except (ValueError, TypeError):
                 pass
         elif not sell and hiive_ask:
             try:
-                hiive_price = float(str(hiive_ask).replace(",", "."))
-                hiive_btn_html = f"""
+                hiive_price = round(float(str(hiive_ask).replace(",", ".")))
+                if existing_price is None or hiive_price > existing_price:
+                    hiive_btn_html = f"""
         <button type="button"
           onclick="document.querySelector('[name={price_field}]').value='{hiive_price}'"
           style="width:100%;margin-bottom:10px;background:#e8f4e8;color:#2a6a2a;border:1px solid #a8d4a8;
                  border-radius:8px;padding:11px;font-size:14px;font-weight:600;cursor:pointer;">
-          ⚡ Match Best Ask: ${hiive_price:,.2f}/share (before commission)
+          ⚡ Match Best Ask: ${hiive_price:,}/share (before commission)
         </button>"""
             except (ValueError, TypeError):
                 pass
