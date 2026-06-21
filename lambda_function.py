@@ -79,6 +79,7 @@ MIN_SIZE_FIELD    = "custom_label_3065488"
 MAX_SIZE_FIELD    = "custom_label_3064645"
 MGMT_FEE_FIELD    = "custom_label_3940558"
 CARRY_FIELD       = "custom_label_3940559"
+LAYERS_FIELD      = "custom_label_3938743"
 SELLER_FEE_FIELD  = "custom_label_3940560"
 SHARE_COUNT_FIELD = "custom_label_3070843"
 REFRESH_FIELD     = "custom_label_3994687"
@@ -422,6 +423,17 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
     max_val      = fmt_input(parse_cf(cf, MAX_SIZE_FIELD))
     mgmt_fee_val = fmt_input(parse_cf(cf, MGMT_FEE_FIELD))
     carry_val    = fmt_input(parse_cf(cf, CARRY_FIELD))
+    layers_raw   = parse_cf(cf, LAYERS_FIELD)
+    try:
+        layers_cur = str(int(float(str(layers_raw)))) if layers_raw not in (None, "") else ""
+    except (ValueError, TypeError):
+        layers_cur = ""
+    _LAYER_OPTS = [("", "— Select —"), ("7000228", "SPV on cap table"),
+                   ("7000229", "2-Layer SPV"), ("7000230", "3-Layer SPV")]
+    layers_options_html = "".join(
+        f'<option value="{val}"{" selected" if val == layers_cur else ""}>{lbl}</option>'
+        for val, lbl in _LAYER_OPTS
+    )
     seller_fee_val = fmt_input(parse_cf(cf, SELLER_FEE_FIELD))
     share_val    = fmt_input(parse_cf(cf, SHARE_COUNT_FIELD))
 
@@ -509,6 +521,12 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         <div class="field" style="margin-bottom:12px">
           <label>Management Fee (%)</label>
           <input type="number" name="mgmt_fee" value="{mgmt_fee_val}" step="0.1" placeholder="e.g. 2">
+        </div>
+        <div class="field" style="margin-bottom:12px">
+          <label>Number of Layers</label>
+          <select name="layers" style="width:100%;padding:10px;border:1px solid #ccc;border-radius:6px;font-size:14px;background:#fff">
+            {layers_options_html}
+          </select>
         </div>
         <div class="field" style="margin-bottom:12px">
           <label>Carry (%)</label>
@@ -1007,6 +1025,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     min_val      = params.get("min_size", "").strip().replace(",", "")
     mgmt_fee_val = params.get("mgmt_fee", "").strip()
     carry_val    = params.get("carry", "").strip()
+    layers_val   = params.get("layers", "").strip()
     seller_fee_val = params.get("seller_fee", "").strip()
     comments     = params.get("comments", "").strip()
 
@@ -1045,6 +1064,9 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         except ValueError: pass
     if carry_val:
         try: custom[CARRY_FIELD] = float(carry_val)
+        except ValueError: pass
+    if layers_val:
+        try: custom[LAYERS_FIELD] = int(layers_val)
         except ValueError: pass
     if seller_fee_val:
         try: custom[SELLER_FEE_FIELD] = float(seller_fee_val)
