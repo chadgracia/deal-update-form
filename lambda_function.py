@@ -191,6 +191,19 @@ def fmt(val):
         return str(val)
 
 
+def fmt_thousands(val):
+    """Pre-fill a size field with thousand-separator commas for readability."""
+    if val is None or val == "":
+        return ""
+    try:
+        f = float(str(val).replace(",", ""))
+        if f == int(f):
+            return f"{int(f):,}"
+        return f"{f:,.2f}"
+    except Exception:
+        return str(val)
+
+
 def fmt_input(val):
     """For pre-filling numeric input fields — no thousand separators."""
     if val is None or val == "":
@@ -419,7 +432,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
 
     gross_val    = fmt_input(parse_cf(cf, GROSS_FIELD))
     net_val      = fmt_input(parse_cf(cf, NET_FIELD))
-    min_val      = fmt_input(parse_cf(cf, MIN_SIZE_FIELD))
+    min_val      = fmt_thousands(parse_cf(cf, MIN_SIZE_FIELD))
     max_val      = fmt_input(parse_cf(cf, MAX_SIZE_FIELD))
     mgmt_fee_val = fmt_input(parse_cf(cf, MGMT_FEE_FIELD))
     carry_val    = fmt_input(parse_cf(cf, CARRY_FIELD))
@@ -819,7 +832,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
 
       <div class="field">
         <label>Minimum Size ($)</label>
-        <input type="number" name="min_size" value="{min_val}" step="1" placeholder="e.g. 100000">
+        <input type="text" inputmode="numeric" name="min_size" value="{min_val}" step="1" placeholder="e.g. 100000">
       </div>
 
       <div class="field">
@@ -1207,6 +1220,16 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
 
     new_max    = custom.get(MAX_SIZE_FIELD)
     new_shares = custom.get(SHARE_COUNT_FIELD)
+    new_layers = custom.get(LAYERS_FIELD)
+
+    _LAYER_LABELS = {7000228: "SPV on cap table", 7000229: "2-Layer SPV", 7000230: "3-Layer SPV"}
+    def fmt_layers(val):
+        if val in (None, ""):
+            return "—"
+        try:
+            return _LAYER_LABELS.get(int(float(str(val))), str(val))
+        except (ValueError, TypeError):
+            return str(val)
 
     # Header size: prefer derived max, else current Max Size; rounded to nearest
     # $50K below $1M, nearest $500K at/above $1M.
@@ -1223,6 +1246,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         ("Mgmt fee",    fmt_pct(parse_cf(current_cf, MGMT_FEE_FIELD)),    fmt_pct(mgmt_fee_val or parse_cf(current_cf, MGMT_FEE_FIELD))),
         ("Carry",       fmt_pct(parse_cf(current_cf, CARRY_FIELD)),       fmt_pct(carry_val or parse_cf(current_cf, CARRY_FIELD))),
         ("Upfront fee", fmt_pct(parse_cf(current_cf, SELLER_FEE_FIELD)),  fmt_pct(seller_fee_val or parse_cf(current_cf, SELLER_FEE_FIELD))),
+        ("Layers",      fmt_layers(parse_cf(current_cf, LAYERS_FIELD)),   fmt_layers(new_layers if new_layers is not None else parse_cf(current_cf, LAYERS_FIELD))),
         ("Stage",       old_stage, new_stage_name),
     ]
 
