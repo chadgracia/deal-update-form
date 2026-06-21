@@ -505,7 +505,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
     if is_spv:
         spv_fields_html = f'''
       <div style="background:#f0f7ff;border:1px solid #cce0ff;border-radius:8px;padding:14px 16px;margin-bottom:20px">
-        <p style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:#1a4a8a;margin-bottom:12px">SPV Terms</p>
+        <p style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:#1a4a8a;margin-bottom:12px">{"SPV Terms" if sell else "Maximum Acceptable SPV Terms"}</p>
         <div class="field" style="margin-bottom:12px">
           <label>Management Fee (%)</label>
           <input type="number" name="mgmt_fee" value="{mgmt_fee_val}" step="0.1" placeholder="e.g. 2">
