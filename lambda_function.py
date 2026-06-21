@@ -1452,6 +1452,33 @@ def handle_qa_answer_submit(params: dict) -> dict:
     buyer_name   = record.get("buyer_name", "")
     seller_email = record.get("seller_email", "")
 
+    # Opt-out: counterparty does not want question requests. Set Messaging=Disallow,
+    # do NOT notify the buyer, consume the link, notify Chad.
+    if (params.get("optout") or "").strip() == "1":
+        try:
+            jwt = get_jwt()
+            call_pipeline_api("PUT", f"/deals/{deal_id}.json",
+                              {"deal": {"custom_fields": {"custom_label_4001285": 7187011}}}, jwt=jwt)
+        except Exception as e:
+            logger.error(f"opt-out: failed to set Messaging=Disallow for {deal_id}: {e}")
+        record["status"] = "answered"
+        record["opted_out"] = True
+        record["answered_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            s3.put_object(Bucket=QA_BUCKET, Key=f"{deal_id}/{set_id}.json",
+                          Body=json.dumps(record).encode(), ContentType="application/json")
+        except Exception as e:
+            logger.error(f"opt-out: failed to update QA record {deal_id}/{set_id}: {e}")
+        try:
+            send_email(CHAD_EMAIL,
+                       f"Messaging opt-out: {deal_name} (#{deal_id})",
+                       f"The counterparty on {deal_name} (deal {deal_id}) chose not to receive "
+                       f"question requests. Messaging is now set to Disallow and the buyer was "
+                       f"not notified.\n\nPipeline: https://app.pipelinecrm.com/deals/{deal_id}")
+        except Exception as e:
+            logger.error(f"opt-out: Chad notice failed for {deal_id}: {e}")
+        return success_page("Done — you won't receive question requests on this deal.")
+
     answers, public_lines, priv_lines = {}, [], []
     for qid in record.get("question_ids", []):
         a       = (params.get(f"a_{qid}", "") or "").strip()
@@ -1634,6 +1661,8 @@ def handle_qa_answer_page(qs: dict) -> dict:
         ".offer { font-weight:600; margin-bottom:8px; }"
         ".btn-submit { margin-top:8px; padding:12px 20px; border:none; border-radius:8px;"
         " background:#1a1a1a; color:#fff; font-size:15px; cursor:pointer; }"
+        ".btn-optout { display:block; margin-top:12px; background:none; border:none;"
+        " color:#888; font-size:13px; text-decoration:underline; cursor:pointer; padding:4px 0; }"
         "input[type=text], input[type=number] { margin-top:6px; }"
         "</style>"
     )
@@ -1649,6 +1678,7 @@ def handle_qa_answer_page(qs: dict) -> dict:
         f'<input type="hidden" name="token" value="{token}">'
         f'{rows}'
         f'<button type="submit" class="btn-submit">Send answers</button>'
+        f'<button type="submit" name="optout" value="1" class="btn-optout" onclick="return confirm(\'Stop receiving question requests for this deal?\')">Do not send me counterparty questions</button>'
         f'</form>'
     ) + style
     return html_response(body)
