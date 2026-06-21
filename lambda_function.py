@@ -41,7 +41,7 @@ QA_TEXT = {
     "shares_avail": "How many shares are available to buy?",
     "seller_fee":   "What is the seller's one-time fee?",
     "upfront_fee":  "Instead of man. fee / carry, would you accept an up front fee of (%):",
-    "nda_l1":       "Can you provide full transparency on the L1 manager under an NDA?",
+    "nda_l1":       "Can you provide full transparency on the L1 manager under NDA?",
     "direct_trade": "Are you able to do a direct trade?",
     "cash_on_hand": "Do you have cash on hand?",
     "qp_accredited":"Are you a QP or accredited?",
