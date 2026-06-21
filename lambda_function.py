@@ -1582,7 +1582,6 @@ def handle_qa_answer_page(qs: dict) -> dict:
 
     if record.get("status") == "answered":
         return html_response(
-            '<div class="logo">Gracia Group</div>'
             '<h1>Already answered</h1>'
             '<p class="subtitle">You\'ve already answered these questions — thank you. '
             'Gracia has been notified and will follow up if anything else is needed.</p>'
@@ -1640,7 +1639,6 @@ def handle_qa_answer_page(qs: dict) -> dict:
     )
 
     body = (
-        f'<div class="logo">Gracia Group</div>'
         f'<h1>{deal_name}</h1>'
         f'<p class="subtitle">A prospective buyer asked the questions below. Your answers go back to '
         f'them; anything typed in a note field comes only to Gracia.</p>'
