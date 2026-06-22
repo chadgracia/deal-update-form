@@ -1091,9 +1091,46 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         try: custom[SELLER_FEE_FIELD] = float(seller_fee_val)
         except ValueError: pass
 
-    # Sell-side: write estimated gross so CRM has both sides for downstream consumers.
-    if sell and eff_net:
-        custom[GROSS_FIELD] = round(eff_net * 1.05, 4)
+    # Sell-side: write gross ONLY for direct trades whose min and max size fall
+    # in the SAME commission tier. The tier sets the commission rate.
+    #   < $1M        -> 5%
+    #   $1M to <$5M  -> 4%
+    #   >= $5M       -> 3%
+    def _commission_tier(size):
+        if size is None:
+            return None
+        if size < 1_000_000:
+            return 0.05
+        if size < 5_000_000:
+            return 0.04
+        return 0.03
+
+    # Direct-structure detection (mirror the is_direct logic used elsewhere in the file)
+    submit_is_direct = False
+    if structure is not None:
+        try:
+            submit_is_direct = int(float(str(structure))) == DIRECT_STRUCTURE_ID
+        except (ValueError, TypeError):
+            if isinstance(structure, list):
+                submit_is_direct = DIRECT_STRUCTURE_ID in [int(x) for x in structure if x]
+
+    # Seller's stated min and max (submitted value if posted, else stored deal value).
+    # Use stated sizes, NOT any derived max, to avoid circularity with gross.
+    eff_min = _f(min_val) or _f(parse_cf(current_cf, MIN_SIZE_FIELD))
+    eff_max = _f(parse_cf(current_cf, MAX_SIZE_FIELD))
+    submitted_max = _f(params.get("max_size", "").strip().replace(",", ""))
+    if submitted_max is not None:
+        eff_max = submitted_max
+
+    commission_rate = None
+    if sell and eff_net and submit_is_direct:
+        t_min = _commission_tier(eff_min)
+        t_max = _commission_tier(eff_max)
+        if t_min is not None and t_min == t_max:
+            commission_rate = t_min
+
+    if commission_rate is not None:
+        custom[GROSS_FIELD] = round(eff_net * (1 + commission_rate), 4)
 
     # Max size: use the entered value if provided, otherwise derive shares x gross.
     if max_val:
@@ -1280,8 +1317,8 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         "",
         *table_lines,
     ]
-    if sell and eff_net:
-        email_lines.append(f"(Estimated gross = net × 1.05 = ${eff_net * 1.05:,.2f}/share)")
+    if commission_rate is not None and eff_net:
+        email_lines.append(f"(Direct trade — gross = net × {1 + commission_rate:.2f} = ${eff_net * (1 + commission_rate):,.2f}/share)")
     if comments:
         email_lines += ["", f"Client note (may need a public-notes update): {comments}"]
     email_lines += ["", "Refresh reset to 60 days."]
