@@ -532,14 +532,14 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
       <div style="background:#f0f7ff;border:1px solid #cce0ff;border-radius:8px;padding:14px 16px;margin-bottom:20px">
         <p style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:#1a4a8a;margin-bottom:12px">{"SPV Terms" if sell else "Maximum Acceptable SPV Terms"}</p>
         <div class="field" style="margin-bottom:12px">
-          <label>Management Fee (%)</label>
-          <input type="number" name="mgmt_fee" value="{mgmt_fee_val}" step="0.1" placeholder="e.g. 2">
-        </div>
-        <div class="field" style="margin-bottom:12px">
           <label>Number of Layers</label>
           <select name="layers" style="width:100%;padding:10px;border:1px solid #ccc;border-radius:6px;font-size:14px;background:#fff">
             {layers_options_html}
           </select>
+        </div>
+        <div class="field" style="margin-bottom:12px">
+          <label>Management Fee (%)</label>
+          <input type="number" name="mgmt_fee" value="{mgmt_fee_val}" step="0.1" placeholder="e.g. 2">
         </div>
         <div class="field" style="margin-bottom:12px">
           <label>Carry (%)</label>
