@@ -433,7 +433,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
     gross_val    = fmt_input(parse_cf(cf, GROSS_FIELD))
     net_val      = fmt_input(parse_cf(cf, NET_FIELD))
     min_val      = fmt_thousands(parse_cf(cf, MIN_SIZE_FIELD))
-    max_val      = fmt_input(parse_cf(cf, MAX_SIZE_FIELD))
+    max_val      = fmt_thousands(parse_cf(cf, MAX_SIZE_FIELD))
     mgmt_fee_val = fmt_input(parse_cf(cf, MGMT_FEE_FIELD))
     carry_val    = fmt_input(parse_cf(cf, CARRY_FIELD))
     layers_raw   = parse_cf(cf, LAYERS_FIELD)
@@ -836,6 +836,11 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
       </div>
 
       <div class="field">
+        <label>Maximum Size ($)</label>
+        <input type="text" inputmode="numeric" name="max_size" value="{max_val}" step="1" placeholder="e.g. 10000000">
+      </div>
+
+      <div class="field">
         <label>Current Public Notes</label>
         <div style="background:#f7f7f7;border:1px solid var(--line);border-radius:9px;padding:12px 14px;font-size:13px;color:#666;white-space:pre-wrap;line-height:1.5;">{summary_display}</div>
       </div>
@@ -1036,6 +1041,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     net_val      = params.get("net", "").strip()
     share_val    = params.get("share_count", "").strip().replace(",", "")
     min_val      = params.get("min_size", "").strip().replace(",", "")
+    max_val      = params.get("max_size", "").strip().replace(",", "")
     mgmt_fee_val = params.get("mgmt_fee", "").strip()
     carry_val    = params.get("carry", "").strip()
     layers_val   = params.get("layers", "").strip()
@@ -1089,8 +1095,13 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     if sell and eff_net:
         custom[GROSS_FIELD] = round(eff_net * 1.05, 4)
 
-    # Derived max: shares × gross.
-    if eff_shares and eff_gross:
+    # Max size: use the entered value if provided, otherwise derive shares x gross.
+    if max_val:
+        try: custom[MAX_SIZE_FIELD] = float(max_val)
+        except ValueError:
+            if eff_shares and eff_gross:
+                custom[MAX_SIZE_FIELD] = round(eff_shares * eff_gross, 2)
+    elif eff_shares and eff_gross:
         custom[MAX_SIZE_FIELD] = round(eff_shares * eff_gross, 2)
 
     payload = {"deal": {"deal_stage_id": new_stage, "custom_fields": custom}}
