@@ -40,6 +40,7 @@ QA_TEXT = {
     "min_max":      "What is the minimum / maximum size?",
     "shares_avail": "How many shares are available to buy?",
     "seller_fee":   "What is the seller's one-time fee?",
+    "fee_structure":"Would you accept this fee structure?",
     "upfront_fee":  "Instead of man. fee / carry, would you accept an up front fee of (%):",
     "nda_l1":       "Can you provide full transparency on the L1 manager under NDA?",
     "direct_trade": "Are you able to do a direct trade?",
@@ -58,6 +59,7 @@ QA_ANSWER = {
     "min_max":       {"type": "text"},
     "shares_avail":  {"type": "number"},
     "seller_fee":    {"type": "text"},
+    "fee_structure": {"type": "fees"},
     "upfront_fee":   {"type": "bool"},
     "nda_l1":        {"type": "bool"},
     "direct_trade":  {"type": "bool"},
@@ -1423,6 +1425,11 @@ def handle_qa_submit(params: dict) -> dict:
 
     bid_amount = (params.get("bid_amount", "") or "").strip()
     bid_size   = (params.get("bid_size", "") or "").strip()
+    # The buyer proposes a fee structure on the deal page; carry it through to the
+    # seller's answer page, the same way bid_amount/bid_size are carried.
+    fee_onetime = (params.get("fee_onetime", "") or "").strip()
+    fee_man     = (params.get("fee_man", "") or "").strip()
+    fee_carry   = (params.get("fee_carry", "") or "").strip()
 
     # Send-once guard: identical (deal, buyer, question set) submissions take an atomic
     # S3 lock via conditional write. A double-click loses the race and short-circuits.
@@ -1467,6 +1474,7 @@ def handle_qa_submit(params: dict) -> dict:
         "set_id": set_id, "deal_id": deal_id, "deal_name": deal_name,
         "buyer_email": buyer_email, "buyer_name": buyer_name,
         "question_ids": selected, "bid_amount": bid_amount, "bid_size": bid_size,
+        "fee_onetime": fee_onetime, "fee_man": fee_man, "fee_carry": fee_carry,
         "seller_email": seller_email, "status": "pending",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -1578,6 +1586,17 @@ def handle_qa_answer_submit(params: dict) -> dict:
         a       = (params.get(f"a_{qid}", "") or "").strip()
         counter = (params.get(f"c_{qid}", "") or "").strip()
         note    = (params.get(f"o_{qid}", "") or "").strip()
+        # A "fees" answer counters with three numbers rather than one field; fold them
+        # into the counter string so the email and record pipeline stay unchanged.
+        if QA_ANSWER.get(qid, {}).get("type") == "fees" and not counter:
+            _m = (params.get(f"f_man_{qid}", "") or "").strip()
+            _c = (params.get(f"f_carry_{qid}", "") or "").strip()
+            _o = (params.get(f"f_once_{qid}", "") or "").strip()
+            _p = []
+            if _m: _p.append(f"management fee {_m}%")
+            if _c: _p.append(f"carry {_c}%")
+            if _o: _p.append(f"one-time fee {_o}%")
+            counter = ", ".join(_p)
         answers[qid] = {"answer": a, "counter": counter, "note": note}
         pub = []
         if a: pub.append(a)
@@ -1743,6 +1762,29 @@ def handle_qa_answer_page(qs: dict) -> dict:
                 f'<input type="text" name="c_{qid}" placeholder="Or counter at $___/share">'
                 f'<input type="text" name="o_{qid}" placeholder="Add a note (sent to Gracia only)">'
             )
+        elif atype == "fees":
+            _fm = record.get("fee_man", "")
+            _fc = record.get("fee_carry", "")
+            _fo = record.get("fee_onetime", "")
+            _bits = []
+            if _fm != "": _bits.append(f"management fee {_fm}%")
+            if _fc != "": _bits.append(f"carry {_fc}%")
+            if _fo != "": _bits.append(f"one-time fee {_fo}%")
+            _proposed = ("Buyer proposes: " + ", ".join(_bits)) if _bits else "Buyer's proposed fee structure"
+            rows += (
+                f'<div class="offer">{_proposed}</div>'
+                f'<label class="opt"><input type="radio" name="a_{qid}" value="Accept"> Accept</label>'
+                f'<label class="opt"><input type="radio" name="a_{qid}" value="Decline"> Decline</label>'
+                f'<div class="feegrid">'
+                f'<label class="feelbl">Management fee (%)'
+                f'<input type="number" step="any" name="f_man_{qid}"></label>'
+                f'<label class="feelbl">Carry (%)'
+                f'<input type="number" step="any" name="f_carry_{qid}"></label>'
+                f'<label class="feelbl">One-time fee (%)'
+                f'<input type="number" step="any" name="f_once_{qid}"></label>'
+                f'</div>'
+                f'<input type="text" name="o_{qid}" placeholder="Add a note (sent to Gracia only)">'
+            )
         elif atype == "number":
             rows += f'<input type="number" step="any" name="a_{qid}" placeholder="Enter a number">'
         else:
@@ -1753,6 +1795,10 @@ def handle_qa_answer_page(qs: dict) -> dict:
         "<style>"
         ".opt { display:inline-block; margin:4px 14px 4px 0; font-weight:400; }"
         ".offer { font-weight:600; margin-bottom:8px; }"
+        ".feegrid { display:flex; gap:10px; margin-top:8px; flex-wrap:wrap; }"
+        ".feelbl { display:flex; flex-direction:column; font-size:13px; color:#555;"
+        " font-weight:400; }"
+        ".feelbl input { width:110px; }"
         ".btn-submit { margin-top:8px; padding:12px 20px; border:none; border-radius:8px;"
         " background:#1a1a1a; color:#fff; font-size:15px; cursor:pointer; }"
         ".btn-optout { display:block; margin-top:12px; background:none; border:none;"
