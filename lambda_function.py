@@ -1735,8 +1735,9 @@ def handle_qa_answer_page(qs: dict) -> dict:
     # The counterparty making the offer is the OPPOSITE side of the answerer.
     # Answerer is a seller -> a buyer is offering (a "bid").
     # Answerer is a buyer  -> a seller is offering (an "offer").
+    # Use "counterparty" in prose so labels read naturally either way; only bid vs
+    # offer switches by side.
     answerer_role = record.get("answerer_role", "seller")
-    offering_side = "Buyer" if answerer_role == "seller" else "Seller"
     offer_word    = "bid" if answerer_role == "seller" else "offer"
 
     rows = ""
@@ -1762,11 +1763,11 @@ def handle_qa_answer_page(qs: dict) -> dict:
             rows += f'<input type="text" name="o_{qid}" placeholder="Other (sent to Gracia only)">'
         elif atype == "offer":
             if bid_amount:
-                offer_txt = f"{offering_side} offers ${bid_amount}/share"
+                offer_txt = f"Counterparty offers ${bid_amount}/share"
                 if bid_size:
                     offer_txt += f" for {bid_size}"
             else:
-                offer_txt = f"{offering_side}'s offer"
+                offer_txt = "Counterparty's offer"
             rows += (
                 f'<div class="offer">{offer_txt}</div>'
                 f'<label class="opt"><input type="radio" name="a_{qid}" value="Accept"> Accept</label>'
@@ -1782,7 +1783,7 @@ def handle_qa_answer_page(qs: dict) -> dict:
             if _fm != "": _bits.append(f"management fee {_fm}%")
             if _fc != "": _bits.append(f"carry {_fc}%")
             if _fo != "": _bits.append(f"one-time fee {_fo}%")
-            _proposed = (f"{offering_side} proposes: " + ", ".join(_bits)) if _bits else f"{offering_side}'s proposed fee structure"
+            _proposed = ("Counterparty proposes: " + ", ".join(_bits)) if _bits else "Counterparty's proposed fee structure"
             rows += (
                 f'<div class="offer">{_proposed}</div>'
                 f'<label class="opt"><input type="radio" name="a_{qid}" value="Accept"> Accept</label>'
