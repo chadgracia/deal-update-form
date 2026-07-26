@@ -1737,8 +1737,18 @@ def handle_qa_answer_page(qs: dict) -> dict:
     # Answerer is a buyer  -> a seller is offering (an "offer").
     # Use "counterparty" in prose so labels read naturally either way; only bid vs
     # offer switches by side.
-    answerer_role = record.get("answerer_role", "seller")
-    offer_word    = "bid" if answerer_role == "seller" else "offer"
+    answerer_role = record.get("answerer_role")
+    if answerer_role not in ("buyer", "seller"):
+        # Legacy record without a stored role — infer from the deal side.
+        try:
+            _jwt = get_jwt()
+            _d = call_pipeline_api("GET", f"/deals/{deal_id}.json", jwt=_jwt).get("data", {})
+            answerer_role = "seller" if is_sell(_d.get("custom_fields", {}) or {}) else "buyer"
+        except Exception as _e:
+            logger.error(f"QA answer role inference failed for {deal_id}: {_e}")
+            answerer_role = "seller"
+    asker_role = "buyer" if answerer_role == "seller" else "seller"
+    offer_word = "bid"   if answerer_role == "seller" else "offer"
 
     rows = ""
     for qid in record.get("question_ids", []):
@@ -1822,7 +1832,7 @@ def handle_qa_answer_page(qs: dict) -> dict:
 
     body = (
         f'<h1>{deal_name}</h1>'
-        f'<p class="subtitle">A prospective buyer asked the questions below. Your answers go back to '
+        f'<p class="subtitle">A {asker_role} asked the questions below. Your answers go back to '
         f'them; anything typed in a note field comes only to Gracia.</p>'
         f'<form method="POST" action="{QA_SELF_URL}">'
         f'<input type="hidden" name="qa" value="answer">'
