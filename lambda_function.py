@@ -1554,6 +1554,9 @@ def handle_qa_answer_submit(params: dict) -> dict:
     buyer_email  = record.get("buyer_email", "")
     buyer_name   = record.get("buyer_name", "")
     seller_email = record.get("seller_email", "")
+    # Roles from the record: buyer_email holds the ASKER, seller_email the ANSWERER.
+    _asker_role    = (record.get("asker_role") or "buyer").title()
+    _answerer_role = (record.get("answerer_role") or "seller").title()
 
     # Opt-out: counterparty does not want question requests. Set Messaging=Disallow,
     # do NOT notify the buyer, consume the link, notify Chad.
@@ -1687,8 +1690,8 @@ def handle_qa_answer_submit(params: dict) -> dict:
         f'<h2 style="margin:0 0 4px 0;font-size:18px;color:#111;">{deal_name}</h2>'
         f'<p style="margin:0 0 14px 0;color:#4b5563;font-size:14px;">Seller answered the buyer Q&amp;A (deal {deal_id}).</p>'
         '<table style="border-collapse:collapse;width:100%;margin-bottom:14px;font-size:13px;">'
-        f'<tr><td style="padding:4px 10px;color:#6b7280;">Buyer</td><td style="padding:4px 10px;color:#111;">{buyer_name or "—"} &lt;{buyer_email or "—"}&gt;</td></tr>'
-        f'<tr><td style="padding:4px 10px;color:#6b7280;">Seller</td><td style="padding:4px 10px;color:#111;">&lt;{seller_email or "—"}&gt;</td></tr>'
+        f'<tr><td style="padding:4px 10px;color:#6b7280;">{_asker_role}</td><td style="padding:4px 10px;color:#111;">{buyer_name or "—"} &lt;{buyer_email or "—"}&gt;</td></tr>'
+        f'<tr><td style="padding:4px 10px;color:#6b7280;">{_answerer_role}</td><td style="padding:4px 10px;color:#111;">&lt;{seller_email or "—"}&gt;</td></tr>'
         '</table>'
         f'<table style="border-collapse:collapse;width:100%;margin-bottom:18px;font-size:14px;">{qa_rows(True)}</table>'
         f'{details_html}'
@@ -1697,7 +1700,7 @@ def handle_qa_answer_submit(params: dict) -> dict:
     )
     chad_plain = (
         f"Seller answered the buyer Q&A on {deal_name} (deal {deal_id}).\n\n"
-        f"Buyer: {buyer_name or '—'} <{buyer_email or '—'}>\nSeller: <{seller_email or '—'}>\n\n"
+        f"{_asker_role}: {buyer_name or '—'} <{buyer_email or '—'}>\n{_answerer_role}: <{seller_email or '—'}>\n\n"
         + "\n".join(priv_lines) + f"\n\nDeal: {deal_link}\nPipeline: {pipeline_link}"
     )
     send_email(CHAD_EMAIL, f"Buyer Q&A answered: {deal_name} (#{deal_id})", chad_plain, html=email_html(chad_inner))
