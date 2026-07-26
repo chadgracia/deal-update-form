@@ -1476,6 +1476,7 @@ def handle_qa_submit(params: dict) -> dict:
         "question_ids": selected, "bid_amount": bid_amount, "bid_size": bid_size,
         "fee_onetime": fee_onetime, "fee_man": fee_man, "fee_carry": fee_carry,
         "seller_email": seller_email, "status": "pending",
+        "answerer_role": answerer_role, "asker_role": asker_role,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     try:
@@ -1731,12 +1732,23 @@ def handle_qa_answer_page(qs: dict) -> dict:
     bid_amount = record.get("bid_amount", "")
     bid_size   = record.get("bid_size", "")
 
+    # The counterparty making the offer is the OPPOSITE side of the answerer.
+    # Answerer is a seller -> a buyer is offering (a "bid").
+    # Answerer is a buyer  -> a seller is offering (an "offer").
+    answerer_role = record.get("answerer_role", "seller")
+    offering_side = "Buyer" if answerer_role == "seller" else "Seller"
+    offer_word    = "bid" if answerer_role == "seller" else "offer"
+
     rows = ""
     for qid in record.get("question_ids", []):
         qtext = QA_TEXT.get(qid, qid)
         atype = QA_ANSWER.get(qid, {}).get("type", "text")
         opts  = QA_ANSWER.get(qid, {}).get("options", [])
 
+        if qid == "accept_bid":
+            qtext = f"Would you accept this {offer_word}?"
+        elif qid == "qp_accredited":
+            qtext = "Are you a Qualified Purchaser ($10M+ in assets) or an accredited investor ($1M+ in assets)?"
         rows += f'<div class="field"><label>{qtext}</label>'
         if atype == "bool":
             rows += (
@@ -1750,11 +1762,11 @@ def handle_qa_answer_page(qs: dict) -> dict:
             rows += f'<input type="text" name="o_{qid}" placeholder="Other (sent to Gracia only)">'
         elif atype == "offer":
             if bid_amount:
-                offer_txt = f"Buyer offers {bid_amount}/share"
+                offer_txt = f"{offering_side} offers ${bid_amount}/share"
                 if bid_size:
                     offer_txt += f" for {bid_size}"
             else:
-                offer_txt = "Buyer's offer"
+                offer_txt = f"{offering_side}'s offer"
             rows += (
                 f'<div class="offer">{offer_txt}</div>'
                 f'<label class="opt"><input type="radio" name="a_{qid}" value="Accept"> Accept</label>'
@@ -1770,7 +1782,7 @@ def handle_qa_answer_page(qs: dict) -> dict:
             if _fm != "": _bits.append(f"management fee {_fm}%")
             if _fc != "": _bits.append(f"carry {_fc}%")
             if _fo != "": _bits.append(f"one-time fee {_fo}%")
-            _proposed = ("Buyer proposes: " + ", ".join(_bits)) if _bits else "Buyer's proposed fee structure"
+            _proposed = (f"{offering_side} proposes: " + ", ".join(_bits)) if _bits else f"{offering_side}'s proposed fee structure"
             rows += (
                 f'<div class="offer">{_proposed}</div>'
                 f'<label class="opt"><input type="radio" name="a_{qid}" value="Accept"> Accept</label>'
