@@ -1620,7 +1620,8 @@ def handle_qa_answer_submit(params: dict) -> dict:
 
     deal_link     = f"https://ewjul4gl75iopu3yfgxfbmvyoq0tlmqf.lambda-url.us-east-1.on.aws/?deal_id={deal_id}"
     pipeline_link = f"https://app.pipelinecrm.com/deals/{deal_id}"
-    company = side = gross = mn = mx = sh = ""
+    company = side = gross = net = mn = mx = sh = ""
+    _sname = structure_txt = ""
     try:
         jwt = get_jwt()
         d  = call_pipeline_api("GET", f"/deals/{deal_id}.json", jwt=jwt).get("data", {})
@@ -1628,9 +1629,15 @@ def handle_qa_answer_submit(params: dict) -> dict:
         company = (d.get("company") or {}).get("name", "")
         side    = "Sell" if is_sell(cf) else "Buy"
         gross   = fmt(parse_cf(cf, GROSS_FIELD))
+        net     = fmt(parse_cf(cf, NET_FIELD))
         mn      = fmt(parse_cf(cf, MIN_SIZE_FIELD))
         mx      = fmt(parse_cf(cf, MAX_SIZE_FIELD))
         sh      = fmt(parse_cf(cf, SHARE_COUNT_FIELD))
+        _sname  = (d.get("primary_contact") or {}).get("full_name", "")
+        _struct_raw = parse_cf(cf, STRUCTURE_FIELD)
+        _struct_ids = _struct_raw if isinstance(_struct_raw, list) else ([_struct_raw] if _struct_raw else [])
+        _struct_map = {6250090: "Direct", 5077906: "Fund / SPV", 5077903: "Forward"}
+        structure_txt = ", ".join(_struct_map.get(int(float(str(x))), "") for x in _struct_ids if str(x).strip()).strip(", ")
         existing_summary = (d.get("summary") or "").strip()
         stamp = datetime.now(timezone.utc).strftime("%b %d, %Y")
         qa_block = f"Q&A ({stamp}):\n" + "\n".join(public_lines)
@@ -1642,7 +1649,11 @@ def handle_qa_answer_submit(params: dict) -> dict:
     details = []
     if company: details.append(("Company", company))
     if side:    details.append(("Side", side))
-    if gross:   details.append(("Price (gross)", f"${gross}"))
+    if structure_txt: details.append(("Structure", structure_txt))
+    if side == "Sell" and net:
+        details.append(("Price (net)", f"${net}"))
+    elif gross:
+        details.append(("Price (gross)", f"${gross}"))
     if mn or mx: details.append(("Size", f"${mn or '?'} - ${mx or '?'}"))
     if sh:      details.append(("Shares", sh))
     details_rows = "".join(
@@ -1691,7 +1702,7 @@ def handle_qa_answer_submit(params: dict) -> dict:
         f'<p style="margin:0 0 14px 0;color:#4b5563;font-size:14px;">Seller answered the buyer Q&amp;A (deal {deal_id}).</p>'
         '<table style="border-collapse:collapse;width:100%;margin-bottom:14px;font-size:13px;">'
         f'<tr><td style="padding:4px 10px;color:#6b7280;">{_asker_role}</td><td style="padding:4px 10px;color:#111;">{buyer_name or "—"} &lt;{buyer_email or "—"}&gt;</td></tr>'
-        f'<tr><td style="padding:4px 10px;color:#6b7280;">{_answerer_role}</td><td style="padding:4px 10px;color:#111;">&lt;{seller_email or "—"}&gt;</td></tr>'
+        f'<tr><td style="padding:4px 10px;color:#6b7280;">{_answerer_role}</td><td style="padding:4px 10px;color:#111;">{_sname or "—"} &lt;{seller_email or "—"}&gt;</td></tr>'
         '</table>'
         f'<table style="border-collapse:collapse;width:100%;margin-bottom:18px;font-size:14px;">{qa_rows(True)}</table>'
         f'{details_html}'
@@ -1700,7 +1711,7 @@ def handle_qa_answer_submit(params: dict) -> dict:
     )
     chad_plain = (
         f"Seller answered the buyer Q&A on {deal_name} (deal {deal_id}).\n\n"
-        f"{_asker_role}: {buyer_name or '—'} <{buyer_email or '—'}>\n{_answerer_role}: <{seller_email or '—'}>\n\n"
+        f"{_asker_role}: {buyer_name or '—'} <{buyer_email or '—'}>\n{_answerer_role}: {_sname or '—'} <{seller_email or '—'}>\n\n"
         + "\n".join(priv_lines) + f"\n\nDeal: {deal_link}\nPipeline: {pipeline_link}"
     )
     send_email(CHAD_EMAIL, f"Buyer Q&A answered: {deal_name} (#{deal_id})", chad_plain, html=email_html(chad_inner))
