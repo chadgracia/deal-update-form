@@ -82,6 +82,7 @@ MAX_SIZE_FIELD    = "custom_label_3064645"
 MGMT_FEE_FIELD    = "custom_label_3940558"
 CARRY_FIELD       = "custom_label_3940559"
 LAYERS_FIELD      = "custom_label_3938743"
+FUND_EXEMPT_FIELD = "custom_label_4006089"
 SELLER_FEE_FIELD  = "custom_label_3940560"
 SHARE_COUNT_FIELD = "custom_label_3070843"
 REFRESH_FIELD     = "custom_label_3994687"
@@ -449,6 +450,16 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         f'<option value="{val}"{" selected" if val == layers_cur else ""}>{lbl}</option>'
         for val, lbl in _LAYER_OPTS
     )
+    fe_raw = parse_cf(cf, FUND_EXEMPT_FIELD)
+    try:
+        fe_cur = str(int(float(str(fe_raw)))) if fe_raw not in (None, "") else ""
+    except (ValueError, TypeError):
+        fe_cur = ""
+    _FE_OPTS = [("", "— Select —"), ("7200027", "3(c)(1)"), ("7200028", "3(c)(7)")]
+    fe_options_html = "".join(
+        f'<option value="{val}"{" selected" if val == fe_cur else ""}>{lbl}</option>'
+        for val, lbl in _FE_OPTS
+    )
     seller_fee_val = fmt_input(parse_cf(cf, SELLER_FEE_FIELD))
     share_val    = fmt_input(parse_cf(cf, SHARE_COUNT_FIELD))
 
@@ -537,6 +548,12 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
           <label>Number of Layers</label>
           <select name="layers" style="width:100%;padding:10px;border:1px solid #ccc;border-radius:6px;font-size:14px;background:#fff">
             {layers_options_html}
+          </select>
+        </div>
+        <div class="field" style="margin-bottom:12px">
+          <label>Fund Exemption <span style="color:#b91c1c">*</span></label>
+          <select name="fund_exemption" required style="width:100%;padding:10px;border:1px solid #ccc;border-radius:6px;font-size:14px;background:#fff">
+            {fe_options_html}
           </select>
         </div>
         <div class="field" style="margin-bottom:12px">
@@ -1047,6 +1064,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     mgmt_fee_val = params.get("mgmt_fee", "").strip()
     carry_val    = params.get("carry", "").strip()
     layers_val   = params.get("layers", "").strip()
+    fund_exempt_val = params.get("fund_exemption", "").strip()
     seller_fee_val = params.get("seller_fee", "").strip()
     comments     = params.get("comments", "").strip()
 
@@ -1088,6 +1106,9 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         except ValueError: pass
     if layers_val:
         try: custom[LAYERS_FIELD] = int(layers_val)
+        except ValueError: pass
+    if fund_exempt_val:
+        try: custom[FUND_EXEMPT_FIELD] = int(fund_exempt_val)
         except ValueError: pass
     if seller_fee_val:
         try: custom[SELLER_FEE_FIELD] = float(seller_fee_val)
@@ -1281,6 +1302,16 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         except (ValueError, TypeError):
             return str(val)
 
+    _FE_LABELS = {7200027: "3(c)(1)", 7200028: "3(c)(7)"}
+    new_fe = custom.get(FUND_EXEMPT_FIELD)
+    def fmt_fe(val):
+        if val in (None, ""):
+            return "—"
+        try:
+            return _FE_LABELS.get(int(float(str(val))), str(val))
+        except (ValueError, TypeError):
+            return str(val)
+
     # Header size: prefer derived max, else current Max Size; rounded to nearest
     # $50K below $1M, nearest $500K at/above $1M.
     max_after_raw = new_max if new_max is not None else parse_cf(current_cf, MAX_SIZE_FIELD)
@@ -1297,6 +1328,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         ("Carry",       fmt_pct(parse_cf(current_cf, CARRY_FIELD)),       fmt_pct(carry_val or parse_cf(current_cf, CARRY_FIELD))),
         ("Upfront fee", fmt_pct(parse_cf(current_cf, SELLER_FEE_FIELD)),  fmt_pct(seller_fee_val or parse_cf(current_cf, SELLER_FEE_FIELD))),
         ("Layers",      fmt_layers(parse_cf(current_cf, LAYERS_FIELD)),   fmt_layers(new_layers if new_layers is not None else parse_cf(current_cf, LAYERS_FIELD))),
+        ("Fund Exemption", fmt_fe(parse_cf(current_cf, FUND_EXEMPT_FIELD)), fmt_fe(new_fe if new_fe is not None else parse_cf(current_cf, FUND_EXEMPT_FIELD))),
         ("Stage",       old_stage, new_stage_name),
     ]
 
