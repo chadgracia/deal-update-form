@@ -261,6 +261,8 @@ def html_response(body_html: str, status: int = 200) -> dict:
     h1 {{ font-size: 22px; font-weight: 700; margin-bottom: 6px; }}
     .subtitle {{ font-size: 14px; color: #666; margin-bottom: 28px; }}
     .field {{ margin-bottom: 20px; }}
+    .field-row {{ display: flex; flex-wrap: wrap; gap: 12px; }}
+    .field-row > .field {{ flex: 1 1 120px; min-width: 120px; }}
     label {{ display: block; font-size: 13px; font-weight: 600; color: #444; margin-bottom: 6px; }}
     input[type=number], input[type=text] {{
       width: 100%;
@@ -556,17 +558,19 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
             {fe_options_html}
           </select>
         </div>
-        <div class="field" style="margin-bottom:12px">
-          <label>Management Fee (%)</label>
-          <input type="number" name="mgmt_fee" value="{mgmt_fee_val}" step="0.1" placeholder="e.g. 2">
-        </div>
-        <div class="field" style="margin-bottom:12px">
-          <label>Carry (%)</label>
-          <input type="number" name="carry" value="{carry_val}" step="0.1" placeholder="e.g. 20">
-        </div>
-        <div class="field" style="margin-bottom:0">
-          <label>One-Time Fee (%)</label>
-          <input type="number" name="seller_fee" value="{seller_fee_val}" step="0.1" placeholder="e.g. 5">
+        <div class="field-row">
+          <div class="field" style="margin-bottom:0">
+            <label>Management Fee (%)</label>
+            <input type="number" name="mgmt_fee" value="{mgmt_fee_val}" step="0.1" placeholder="e.g. 2">
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label>Carry (%)</label>
+            <input type="number" name="carry" value="{carry_val}" step="0.1" placeholder="e.g. 20">
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label>One-Time Fee (%)</label>
+            <input type="number" name="seller_fee" value="{seller_fee_val}" step="0.1" placeholder="e.g. 5">
+          </div>
         </div>
       </div>'''
 
