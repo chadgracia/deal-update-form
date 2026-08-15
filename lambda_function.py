@@ -560,16 +560,16 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         </div>
         <div class="field-row">
           <div class="field" style="margin-bottom:0">
+            <label>One-Time Fee (%)</label>
+            <input type="number" name="seller_fee" value="{seller_fee_val}" step="0.1" placeholder="e.g. 5">
+          </div>
+          <div class="field" style="margin-bottom:0">
             <label>Management Fee (%)</label>
             <input type="number" name="mgmt_fee" value="{mgmt_fee_val}" step="0.1" placeholder="e.g. 2">
           </div>
           <div class="field" style="margin-bottom:0">
             <label>Carry (%)</label>
             <input type="number" name="carry" value="{carry_val}" step="0.1" placeholder="e.g. 20">
-          </div>
-          <div class="field" style="margin-bottom:0">
-            <label>One-Time Fee (%)</label>
-            <input type="number" name="seller_fee" value="{seller_fee_val}" step="0.1" placeholder="e.g. 5">
           </div>
         </div>
       </div>'''
@@ -853,14 +853,15 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         <input type="number" name="share_count" value="{share_val}" step="1" placeholder="e.g. 100000">
       </div>
 
-      <div class="field">
-        <label>Minimum Size ($)</label>
-        <input type="text" inputmode="numeric" name="min_size" value="{min_val}" step="1" placeholder="e.g. 100000">
-      </div>
-
-      <div class="field">
-        <label>Maximum Size ($)</label>
-        <input type="text" inputmode="numeric" name="max_size" value="{max_val}" step="1" placeholder="e.g. 10000000">
+      <div class="field-row">
+        <div class="field" style="margin-bottom:0">
+          <label>Minimum Size ($)</label>
+          <input type="text" inputmode="numeric" name="min_size" value="{min_val}" step="1" placeholder="e.g. 100000">
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <label>Maximum Size ($)</label>
+          <input type="text" inputmode="numeric" name="max_size" value="{max_val}" step="1" placeholder="e.g. 10000000">
+        </div>
       </div>
 
       <div class="field">
@@ -1326,11 +1327,12 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         ("Market",      "—",                      market_value),
         ("Gross price", fmt_email(current_gross), fmt_email(gross_after)),
         ("Shares",      fmt_count(parse_cf(current_cf, SHARE_COUNT_FIELD)), fmt_count(new_shares if new_shares is not None else parse_cf(current_cf, SHARE_COUNT_FIELD))),
-        ("Min size",    fmt_email(parse_cf(current_cf, MIN_SIZE_FIELD)),    fmt_email(min_val or parse_cf(current_cf, MIN_SIZE_FIELD))),
-        ("Max size",    fmt_email(parse_cf(current_cf, MAX_SIZE_FIELD)),    fmt_email(new_max if new_max is not None else parse_cf(current_cf, MAX_SIZE_FIELD))),
+        ("Size",
+         f"{fmt_email(parse_cf(current_cf, MIN_SIZE_FIELD))} – {fmt_email(parse_cf(current_cf, MAX_SIZE_FIELD))}",
+         f"{fmt_email(min_val or parse_cf(current_cf, MIN_SIZE_FIELD))} – {fmt_email(new_max if new_max is not None else parse_cf(current_cf, MAX_SIZE_FIELD))}"),
+        ("Upfront fee", fmt_pct(parse_cf(current_cf, SELLER_FEE_FIELD)),  fmt_pct(seller_fee_val or parse_cf(current_cf, SELLER_FEE_FIELD))),
         ("Mgmt fee",    fmt_pct(parse_cf(current_cf, MGMT_FEE_FIELD)),    fmt_pct(mgmt_fee_val or parse_cf(current_cf, MGMT_FEE_FIELD))),
         ("Carry",       fmt_pct(parse_cf(current_cf, CARRY_FIELD)),       fmt_pct(carry_val or parse_cf(current_cf, CARRY_FIELD))),
-        ("Upfront fee", fmt_pct(parse_cf(current_cf, SELLER_FEE_FIELD)),  fmt_pct(seller_fee_val or parse_cf(current_cf, SELLER_FEE_FIELD))),
         ("Layers",      fmt_layers(parse_cf(current_cf, LAYERS_FIELD)),   fmt_layers(new_layers if new_layers is not None else parse_cf(current_cf, LAYERS_FIELD))),
         ("Fund Exemption", fmt_fe(parse_cf(current_cf, FUND_EXEMPT_FIELD)), fmt_fe(new_fe if new_fe is not None else parse_cf(current_cf, FUND_EXEMPT_FIELD))),
         ("Stage",       old_stage, new_stage_name),
