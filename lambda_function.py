@@ -42,7 +42,7 @@ QA_TEXT = {
     "seller_fee":   "What is the seller's one-time fee?",
     "fee_structure":"Would you accept this fee structure?",
     "upfront_fee":  "Instead of man. fee / carry, would you accept an up front fee of (%):",
-    "nda_l1":       "Can you provide full transparency on the L1 manager under NDA?",
+    "nda_l1":       "Can we conduct due diligence on the L1 manager under NDA?",
     "direct_trade": "Do you have company permission to directly transfer?",
     "data_room_avail": "Is a data room available for diligence?",
     "accept_fund":  "Would you accept a fund structure?",
@@ -56,7 +56,7 @@ QA_TEXT = {
 }
 QA_ANSWER = {
     "accept_bid":    {"type": "offer"},
-    "deadline":      {"type": "text"},
+    "deadline":      {"type": "date"},
     "class":         {"type": "choice", "options": ["Common", "Preferred", "Both"]},
     "min_max":       {"type": "text"},
     "shares_avail":  {"type": "number"},
@@ -1651,6 +1651,11 @@ def handle_qa_answer_submit(params: dict) -> dict:
         if note: prv.append(f"note (Gracia only): {note}")
         priv_lines.append(f"- {QA_TEXT.get(qid, qid)}\n    {'; '.join(prv) if prv else '(no response)'}")
 
+    general_note = (params.get("o_general", "") or "").strip()
+    if general_note:
+        answers["_general_note"] = {"answer": "", "counter": "", "note": general_note}
+        priv_lines.append(f"- Note to Gracia Group (private):\n    {general_note}")
+
     record["status"], record["answers"] = "answered", answers
     record["answered_at"] = datetime.now(timezone.utc).isoformat()
     try:
@@ -1809,12 +1814,10 @@ def handle_qa_answer_page(qs: dict) -> dict:
             rows += (
                 f'<label class="opt"><input type="radio" name="a_{qid}" value="Yes"> Yes</label>'
                 f'<label class="opt"><input type="radio" name="a_{qid}" value="No"> No</label>'
-                f'<input type="text" name="o_{qid}" placeholder="Or add a note (sent to Gracia only)">'
             )
         elif atype == "choice":
             for o in opts:
                 rows += f'<label class="opt"><input type="radio" name="a_{qid}" value="{o}"> {o}</label>'
-            rows += f'<input type="text" name="o_{qid}" placeholder="Other (sent to Gracia only)">'
         elif atype == "offer":
             if bid_amount:
                 offer_txt = f"Counterparty offers ${bid_amount}/share"
@@ -1827,7 +1830,6 @@ def handle_qa_answer_page(qs: dict) -> dict:
                 f'<label class="opt"><input type="radio" name="a_{qid}" value="Accept"> Accept</label>'
                 f'<label class="opt"><input type="radio" name="a_{qid}" value="Decline"> Decline</label>'
                 f'<input type="text" name="c_{qid}" placeholder="Or counter at $___/share">'
-                f'<input type="text" name="o_{qid}" placeholder="Add a note (sent to Gracia only)">'
             )
         elif atype == "fees":
             _fm = record.get("fee_man", "")
@@ -1841,7 +1843,7 @@ def handle_qa_answer_page(qs: dict) -> dict:
             rows += (
                 f'<div class="offer">{_proposed}</div>'
                 f'<label class="opt"><input type="radio" name="a_{qid}" value="Accept"> Accept</label>'
-                f'<label class="opt"><input type="radio" name="a_{qid}" value="Decline"> Decline</label>'
+                f'<label class="opt"><input type="radio" name="a_{qid}" value="Decline"> Decline &amp; Counter:</label>'
                 f'<div class="feegrid">'
                 f'<label class="feelbl">Management fee (%)'
                 f'<input type="number" step="any" name="f_man_{qid}"></label>'
@@ -1850,8 +1852,9 @@ def handle_qa_answer_page(qs: dict) -> dict:
                 f'<label class="feelbl">One-time fee (%)'
                 f'<input type="number" step="any" name="f_once_{qid}"></label>'
                 f'</div>'
-                f'<input type="text" name="o_{qid}" placeholder="Add a note (sent to Gracia only)">'
             )
+        elif atype == "date":
+            rows += f'<input type="date" name="a_{qid}">'
         elif atype == "number":
             rows += f'<input type="number" step="any" name="a_{qid}" placeholder="Enter a number">'
         else:
@@ -1871,19 +1874,23 @@ def handle_qa_answer_page(qs: dict) -> dict:
         ".btn-optout { display:block; margin-top:12px; background:none; border:none;"
         " color:#888; font-size:13px; text-decoration:underline; cursor:pointer; padding:4px 0; }"
         "input[type=text], input[type=number] { margin-top:6px; }"
+        " textarea { margin-top:6px; width:100%; box-sizing:border-box; font:inherit; padding:10px;"
+        " border:1px solid #ccc; border-radius:8px; }"
         "</style>"
     )
 
     body = (
         f'<h1>{deal_name}</h1>'
         f'<p class="subtitle">A {asker_role} asked the questions below. Your answers go back to '
-        f'them; anything typed in a note field comes only to Gracia.</p>'
+        f'them; anything typed in the notes box at the bottom comes only to Gracia Group.</p>'
         f'<form method="POST" action="{QA_SELF_URL}">'
         f'<input type="hidden" name="qa" value="answer">'
         f'<input type="hidden" name="deal_id" value="{deal_id}">'
         f'<input type="hidden" name="set" value="{set_id}">'
         f'<input type="hidden" name="token" value="{token}">'
         f'{rows}'
+        f'<div class="field"><label>Notes (sent to Gracia Group only — not shared with the counterparty)</label>'
+        f'<textarea name="o_general" rows="3" placeholder="Anything you want Gracia Group to know"></textarea></div>'
         f'<button type="submit" class="btn-submit">Send answers</button>'
         f'<button type="submit" name="optout" value="1" class="btn-optout" onclick="return confirm(\'Stop receiving question requests for this deal?\')">Do not send me counterparty questions</button>'
         f'</form>'
