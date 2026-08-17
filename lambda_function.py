@@ -1873,9 +1873,11 @@ def handle_qa_answer_page(qs: dict) -> dict:
         " background:#1a1a1a; color:#fff; font-size:15px; cursor:pointer; }"
         ".btn-optout { display:block; margin-top:12px; background:none; border:none;"
         " color:#888; font-size:13px; text-decoration:underline; cursor:pointer; padding:4px 0; }"
-        "input[type=text], input[type=number] { margin-top:6px; }"
-        " textarea { margin-top:6px; width:100%; box-sizing:border-box; font:inherit; padding:10px;"
-        " border:1px solid #ccc; border-radius:8px; }"
+        "input[type=text], input[type=number] { margin-top:6px; font-size:15px; }"
+        " input[type=date] { margin-top:6px; padding:12px; border:1px solid #ccc; border-radius:8px;"
+        " font:inherit; font-size:15px; background:#fff; width:220px; box-sizing:border-box; }"
+        " textarea { margin-top:6px; width:100%; box-sizing:border-box; font:inherit; font-size:15px;"
+        " padding:12px; border:1px solid #ccc; border-radius:8px; }"
         "</style>"
     )
 
@@ -1889,8 +1891,8 @@ def handle_qa_answer_page(qs: dict) -> dict:
         f'<input type="hidden" name="set" value="{set_id}">'
         f'<input type="hidden" name="token" value="{token}">'
         f'{rows}'
-        f'<div class="field"><label>Notes (sent to Gracia Group only — not shared with the counterparty)</label>'
-        f'<textarea name="o_general" rows="3" placeholder="Anything you want Gracia Group to know"></textarea></div>'
+        f'<div class="field"><label>Notes (sent privately to Gracia Group)</label>'
+        f'<textarea name="o_general" rows="3" placeholder="Anything you want Gracia Group to know — or forward to the {asker_role}"></textarea></div>'
         f'<button type="submit" class="btn-submit">Send answers</button>'
         f'<button type="submit" name="optout" value="1" class="btn-optout" onclick="return confirm(\'Stop receiving question requests for this deal?\')">Do not send me counterparty questions</button>'
         f'</form>'
