@@ -1638,9 +1638,9 @@ def handle_qa_answer_submit(params: dict) -> dict:
             _c = (params.get(f"f_carry_{qid}", "") or "").strip()
             _o = (params.get(f"f_once_{qid}", "") or "").strip()
             _p = []
+            if _o: _p.append(f"one-time fee {_o}%")
             if _m: _p.append(f"management fee {_m}%")
             if _c: _p.append(f"carry {_c}%")
-            if _o: _p.append(f"one-time fee {_o}%")
             counter = ", ".join(_p)
         answers[qid] = {"answer": a, "counter": counter, "note": note}
         pub = []
@@ -1836,21 +1836,21 @@ def handle_qa_answer_page(qs: dict) -> dict:
             _fc = record.get("fee_carry", "")
             _fo = record.get("fee_onetime", "")
             _bits = []
+            if _fo != "": _bits.append(f"one-time fee {_fo}%")
             if _fm != "": _bits.append(f"management fee {_fm}%")
             if _fc != "": _bits.append(f"carry {_fc}%")
-            if _fo != "": _bits.append(f"one-time fee {_fo}%")
             _proposed = ("Counterparty proposes: " + ", ".join(_bits)) if _bits else "Counterparty's proposed fee structure"
             rows += (
                 f'<div class="offer">{_proposed}</div>'
                 f'<label class="opt"><input type="radio" name="a_{qid}" value="Accept"> Accept</label>'
                 f'<label class="opt"><input type="radio" name="a_{qid}" value="Decline"> Decline &amp; Counter:</label>'
                 f'<div class="feegrid">'
+                f'<label class="feelbl">One-time fee (%)'
+                f'<input type="number" step="any" name="f_once_{qid}"></label>'
                 f'<label class="feelbl">Management fee (%)'
                 f'<input type="number" step="any" name="f_man_{qid}"></label>'
                 f'<label class="feelbl">Carry (%)'
                 f'<input type="number" step="any" name="f_carry_{qid}"></label>'
-                f'<label class="feelbl">One-time fee (%)'
-                f'<input type="number" step="any" name="f_once_{qid}"></label>'
                 f'</div>'
             )
         elif atype == "date":
@@ -1882,16 +1882,14 @@ def handle_qa_answer_page(qs: dict) -> dict:
         " padding:12px; border:1px solid #ccc; border-radius:8px; }"
         "</style>"
         "<script>"
-        "document.querySelectorAll('.field').forEach(function(f){"
-        " var grid=f.querySelector('.feegrid'); if(!grid) return;"
-        " var radios=f.querySelectorAll('input[type=radio]');"
-        " function upd(){ var v=''; radios.forEach(function(r){ if(r.checked) v=r.value; });"
-        " var on=(v==='Decline');"
-        " grid.querySelectorAll('input').forEach(function(i){ i.disabled=!on; if(!on){ i.value=''; } });"
-        " grid.style.opacity=on?'1':'0.45'; }"
-        " radios.forEach(function(r){ r.addEventListener('change',upd); });"
-        " upd(); });"
-        "</script>"
+        "document.addEventListener('change',function(e){var t=e.target;"
+        "if(t.type!=='radio'||t.name.indexOf('a_')!==0)return;"
+        "var f=t.closest('.field');if(!f)return;"
+        "var g=f.querySelector('.feegrid');if(!g)return;"
+        "var lock=(t.value==='Accept');"
+        "g.querySelectorAll('input').forEach(function(i){i.disabled=lock;if(lock)i.value='';});"
+        "f.querySelectorAll('.feelbl').forEach(function(l){l.style.opacity=lock?'0.45':'1';});"
+        "});</script>"
     )
 
     body = (
