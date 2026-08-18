@@ -1881,6 +1881,17 @@ def handle_qa_answer_page(qs: dict) -> dict:
         " textarea { margin-top:6px; width:100%; box-sizing:border-box; font:inherit; font-size:15px;"
         " padding:12px; border:1px solid #ccc; border-radius:8px; }"
         "</style>"
+        "<script>"
+        "document.querySelectorAll('.field').forEach(function(f){"
+        " var grid=f.querySelector('.feegrid'); if(!grid) return;"
+        " var radios=f.querySelectorAll('input[type=radio]');"
+        " function upd(){ var v=''; radios.forEach(function(r){ if(r.checked) v=r.value; });"
+        " var on=(v==='Decline');"
+        " grid.querySelectorAll('input').forEach(function(i){ i.disabled=!on; if(!on){ i.value=''; } });"
+        " grid.style.opacity=on?'1':'0.45'; }"
+        " radios.forEach(function(r){ r.addEventListener('change',upd); });"
+        " upd(); });"
+        "</script>"
     )
 
     body = (
