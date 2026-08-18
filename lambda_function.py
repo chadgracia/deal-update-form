@@ -461,7 +461,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         fe_cur = str(int(float(str(fe_raw)))) if fe_raw not in (None, "") else ""
     except (ValueError, TypeError):
         fe_cur = ""
-    _FE_OPTS = [("", "— Select —"), ("7200027", "3(c)(1)"), ("7200028", "3(c)(7)")]
+    _FE_OPTS = [("", "— Select —"), ("7200027", "3(c)(1)"), ("7200028", "3(c)(7)"), ("7201486", "Other / Non-US")]
     fe_options_html = "".join(
         f'<option value="{val}"{" selected" if val == fe_cur else ""}>{lbl}</option>'
         for val, lbl in _FE_OPTS
@@ -1313,7 +1313,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         except (ValueError, TypeError):
             return str(val)
 
-    _FE_LABELS = {7200027: "3(c)(1)", 7200028: "3(c)(7)"}
+    _FE_LABELS = {7200027: "3(c)(1)", 7200028: "3(c)(7)", 7201486: "Other / Non-US"}
     new_fe = custom.get(FUND_EXEMPT_FIELD)
     def fmt_fe(val):
         if val in (None, ""):
