@@ -1864,7 +1864,9 @@ def handle_qa_answer_page(qs: dict) -> dict:
     style = (
         "<style>"
         ".opt { display:inline-block; margin:4px 14px 4px 0; font-weight:400; }"
-        ".offer { font-weight:600; margin-bottom:8px; }"
+        ".offer { font-size:14px; font-weight:400; color:#1f2937;"
+        " background:#f1f4f7; border-left:3px solid #3d5a73;"
+        " padding:8px 12px; border-radius:0 6px 6px 0; margin:6px 0 10px 0; }"
         ".feegrid { display:flex; gap:10px; margin-top:8px; flex-wrap:wrap; }"
         ".feelbl { display:flex; flex-direction:column; font-size:13px; color:#555;"
         " font-weight:400; }"
