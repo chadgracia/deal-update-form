@@ -859,7 +859,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         <input type="number" name="share_count" value="{share_val}" step="1" placeholder="e.g. 100000">
       </div>
 
-      <div class="field-row">
+      <div class="field-row" style="margin-bottom:20px">
         <div class="field" style="margin-bottom:0">
           <label>Minimum Size ($)</label>
           <input type="text" inputmode="numeric" name="min_size" value="{min_val}" step="1" placeholder="e.g. 100000">
