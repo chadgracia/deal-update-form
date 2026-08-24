@@ -96,6 +96,7 @@ COMPANY_PPS_FIELD = "custom_label_3064363"
 COMPANY_VAL_FIELD = "custom_label_3790429"
 HIIVE_ASK_FIELD  = "custom_label_3997297"
 HIIVE_BID_FIELD  = "custom_label_3997298"
+HIIVE_PRICE_FIELD = "custom_label_3999575"
 HIIVE_ASK_DATE_FIELD = "custom_label_3997299"
 HIIVE_BID_DATE_FIELD = "custom_label_3997300"
 DIRECT_STRUCTURE_ID  = 6250090
@@ -494,12 +495,14 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
     hiive_ask = None
     hiive_bid_date = None
     hiive_ask_date = None
-    if company_rec and is_direct:
+    hiive_price = None
+    if company_rec:
         ccf = company_rec.get("custom_fields", {})
         hiive_bid = parse_cf(ccf, HIIVE_BID_FIELD)
         hiive_ask = parse_cf(ccf, HIIVE_ASK_FIELD)
         hiive_bid_date = parse_cf(ccf, HIIVE_BID_DATE_FIELD)
         hiive_ask_date = parse_cf(ccf, HIIVE_ASK_DATE_FIELD)
+        hiive_price = parse_cf(ccf, HIIVE_PRICE_FIELD)
 
     if sell:
         price_label   = "Net Price (your take-home after commission)"
@@ -529,13 +532,10 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
                     rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #eee"><span style="color:#888">Your price vs last round</span><span style="font-weight:500">{abs(disc):.1f}% {sign}</span></div>')
             except (ValueError, TypeError):
                 pass
-        hiive_ref = parse_cf(ccf, HIIVE_BID_FIELD) if sell else parse_cf(ccf, HIIVE_ASK_FIELD)
-        if hiive_ref and is_direct:
+        if hiive_price:
             try:
-                hiive_ref_f = round(float(str(hiive_ref).replace(",", ".")))
-                _ref_ok = deal_price is None or (hiive_ref_f < deal_price if sell else hiive_ref_f > deal_price)
-                if _ref_ok:
-                    rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0"><span style="color:#888">Approximate market price</span><span style="font-weight:500">${hiive_ref_f:,}/share</span></div>')
+                hiive_ref_f = round(float(str(hiive_price).replace(",", ".")))
+                rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0"><span style="color:#888">Approximate market price</span><span style="font-weight:500">${hiive_ref_f:,}/share</span></div>')
             except (ValueError, TypeError):
                 pass
         if rows:
@@ -808,33 +808,24 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
 
     # Build Hiive match button
     hiive_btn_html = ""
-    if is_direct:
-        if sell and hiive_bid:
-            try:
-                hiive_price = round(float(str(hiive_bid).replace(",", ".")))
-                if existing_price is None or hiive_price < existing_price:
-                    hiive_btn_html = f"""
+    if hiive_price:
+        try:
+            hiive_mkt = round(float(str(hiive_price).replace(",", ".")))
+            show_match = False
+            if sell and (existing_price is None or hiive_mkt < existing_price):
+                show_match = True
+            elif not sell and (existing_price is None or hiive_mkt > existing_price):
+                show_match = True
+            if show_match:
+                hiive_btn_html = f"""
         <button type="button"
-          onclick="document.querySelector('[name={price_field}]').value='{hiive_price}'"
+          onclick="document.querySelector('[name={price_field}]').value='{hiive_mkt}'"
           style="width:100%;margin-bottom:10px;background:#e8f4e8;color:#2a6a2a;border:1px solid #a8d4a8;
                  border-radius:8px;padding:11px;font-size:14px;font-weight:600;cursor:pointer;">
-          ⚡ Match Best Bid: ${hiive_price:,}/share (before commission)
+          ⚡ Match Market Price: ${hiive_mkt:,}/share (before commission)
         </button>"""
-            except (ValueError, TypeError):
-                pass
-        elif not sell and hiive_ask:
-            try:
-                hiive_price = round(float(str(hiive_ask).replace(",", ".")))
-                if existing_price is None or hiive_price > existing_price:
-                    hiive_btn_html = f"""
-        <button type="button"
-          onclick="document.querySelector('[name={price_field}]').value='{hiive_price}'"
-          style="width:100%;margin-bottom:10px;background:#e8f4e8;color:#2a6a2a;border:1px solid #a8d4a8;
-                 border-radius:8px;padding:11px;font-size:14px;font-weight:600;cursor:pointer;">
-          ⚡ Match Best Ask: ${hiive_price:,}/share (before commission)
-        </button>"""
-            except (ValueError, TypeError):
-                pass
+        except (ValueError, TypeError):
+            pass
 
     summary_current = (deal.get("summary") or "").strip()
     summary_display = summary_current if summary_current else "No public notes on file yet."
@@ -1148,6 +1139,15 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
             if isinstance(structure, list):
                 submit_is_direct = DIRECT_STRUCTURE_ID in [int(x) for x in structure if x]
 
+    # SPV detection for email (mirrors render_form logic)
+    submit_is_spv = False
+    if structure is not None:
+        try:
+            submit_is_spv = int(float(str(structure))) == 5077906
+        except (ValueError, TypeError):
+            if isinstance(structure, list):
+                submit_is_spv = 5077906 in [int(x) for x in structure if x]
+
     # Seller's stated min and max (submitted value if posted, else stored deal value).
     # Use stated sizes, NOT any derived max, to avoid circularity with gross.
     eff_min = _f(min_val) or _f(parse_cf(current_cf, MIN_SIZE_FIELD))
@@ -1328,21 +1328,41 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     max_after_raw = new_max if new_max is not None else parse_cf(current_cf, MAX_SIZE_FIELD)
     size_display = fmt_size_short(max_after_raw)
 
+    # Premium / discount vs market (Hiive Price)
+    hiive_price_field = HIIVE_PRICE_FIELD
+    hiive_px_raw = parse_cf(ccf, hiive_price_field)
+    mkt_premium_str = "—"
+    if hiive_px_raw not in (None, ""):
+        try:
+            hiive_px_f = float(str(hiive_px_raw).replace(",", "."))
+            compare_price = float(str(net_after).replace("$", "").replace(",", "")) if net_after not in ("—", None, "") else None
+            if compare_price and hiive_px_f:
+                pct = ((compare_price - hiive_px_f) / hiive_px_f) * 100
+                if pct >= 0:
+                    mkt_premium_str = f'<span style="color:#16a34a">+{pct:.1f}% premium</span>'
+                else:
+                    mkt_premium_str = f'<span style="color:#dc2626">{pct:.1f}% discount</span>'
+        except (ValueError, TypeError):
+            pass
+
     rows = [
         ("Net price",   fmt_email(current_net),   fmt_email(net_after)),
-        ("Market",      "—",                      market_value),
+        ("vs Market",   "",                       mkt_premium_str),
         ("Gross price", fmt_email(current_gross), fmt_email(gross_after)),
         ("Shares",      fmt_count(parse_cf(current_cf, SHARE_COUNT_FIELD)), fmt_count(new_shares if new_shares is not None else parse_cf(current_cf, SHARE_COUNT_FIELD))),
         ("Size",
          f"{fmt_email(parse_cf(current_cf, MIN_SIZE_FIELD))} – {fmt_email(parse_cf(current_cf, MAX_SIZE_FIELD))}",
          f"{fmt_email(min_val or parse_cf(current_cf, MIN_SIZE_FIELD))} – {fmt_email(new_max if new_max is not None else parse_cf(current_cf, MAX_SIZE_FIELD))}"),
-        ("Upfront fee", fmt_pct(parse_cf(current_cf, SELLER_FEE_FIELD)),  fmt_pct(seller_fee_val or parse_cf(current_cf, SELLER_FEE_FIELD))),
-        ("Mgmt fee",    fmt_pct(parse_cf(current_cf, MGMT_FEE_FIELD)),    fmt_pct(mgmt_fee_val or parse_cf(current_cf, MGMT_FEE_FIELD))),
-        ("Carry",       fmt_pct(parse_cf(current_cf, CARRY_FIELD)),       fmt_pct(carry_val or parse_cf(current_cf, CARRY_FIELD))),
-        ("Layers",      fmt_layers(parse_cf(current_cf, LAYERS_FIELD)),   fmt_layers(new_layers if new_layers is not None else parse_cf(current_cf, LAYERS_FIELD))),
-        ("Fund Exemption", fmt_fe(parse_cf(current_cf, FUND_EXEMPT_FIELD)), fmt_fe(new_fe if new_fe is not None else parse_cf(current_cf, FUND_EXEMPT_FIELD))),
-        ("Stage",       old_stage, new_stage_name),
     ]
+    if submit_is_spv:
+        rows += [
+            ("Upfront fee", fmt_pct(parse_cf(current_cf, SELLER_FEE_FIELD)),  fmt_pct(seller_fee_val or parse_cf(current_cf, SELLER_FEE_FIELD))),
+            ("Mgmt fee",    fmt_pct(parse_cf(current_cf, MGMT_FEE_FIELD)),    fmt_pct(mgmt_fee_val or parse_cf(current_cf, MGMT_FEE_FIELD))),
+            ("Carry",       fmt_pct(parse_cf(current_cf, CARRY_FIELD)),       fmt_pct(carry_val or parse_cf(current_cf, CARRY_FIELD))),
+            ("Layers",      fmt_layers(parse_cf(current_cf, LAYERS_FIELD)),   fmt_layers(new_layers if new_layers is not None else parse_cf(current_cf, LAYERS_FIELD))),
+            ("Fund Exemption", fmt_fe(parse_cf(current_cf, FUND_EXEMPT_FIELD)), fmt_fe(new_fe if new_fe is not None else parse_cf(current_cf, FUND_EXEMPT_FIELD))),
+        ]
+    rows.append(("Stage", old_stage, new_stage_name))
 
     # Plain-text fallback (preserve existing line-based format)
     col1 = max(len(r[0]) for r in rows)
@@ -1352,7 +1372,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     divider = "─" * (col1 + col2 + 20)
     table_lines = [header, divider]
     for label, old_v, new_v in rows:
-        changed = " ✓" if (label != "Market" and old_v != new_v) else ""
+        changed = " ✓" if (label not in ("vs Market",) and old_v != new_v) else ""
         table_lines.append(f"{label:<{col1}}  {old_v:<{col2}}  {new_v}{changed}")
 
     email_lines = [
@@ -1377,7 +1397,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     td_style = "font-size:13px;padding:10px;border-bottom:1px solid #f3f4f6;"
     body_rows_html = []
     for label, old_v, new_v in rows:
-        is_market = (label == "Market")
+        is_market = (label == "vs Market")
         changed = (not is_market) and (old_v != new_v)
         tr_open = '<tr style="background:#fafafa;">' if is_market else "<tr>"
         check = ' <span style="color:#16a34a;">✓</span>' if changed else ""
