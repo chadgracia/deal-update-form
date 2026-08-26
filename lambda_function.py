@@ -447,27 +447,6 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
     net_val      = fmt_input(parse_cf(cf, NET_FIELD))
     min_val      = fmt_thousands(parse_cf(cf, MIN_SIZE_FIELD))
     max_val      = fmt_thousands(parse_cf(cf, MAX_SIZE_FIELD))
-    data_room_row = ""
-    if sell:
-        _dr_raw = parse_cf(cf, DATA_ROOM_FIELD)
-        try:
-            _dr_cur = int(float(str(_dr_raw))) if _dr_raw not in (None, "") else None
-        except (ValueError, TypeError):
-            _dr_cur = None
-        _dr_yes = " selected" if _dr_cur == DATA_ROOM_YES_ID else ""
-        _dr_no  = " selected" if _dr_cur == DATA_ROOM_NO_ID else ""
-        _dr_ph  = "" if _dr_cur in (DATA_ROOM_YES_ID, DATA_ROOM_NO_ID) else " selected"
-        data_room_row = (
-            '<div class="field">'
-            '<label>Data Room Available? <span style="color:#b91c1c">*</span></label>'
-            '<select name="data_room" required '
-            'style="width:100%;padding:11px 12px;border:1px solid var(--line);'
-            'border-radius:9px;font-size:15px;background:#fff;">'
-            '<option value="" disabled' + _dr_ph + '>&mdash; Select &mdash;</option>'
-            '<option value="yes"' + _dr_yes + '>Yes</option>'
-            '<option value="no"' + _dr_no + '>No</option>'
-            "</select></div>"
-        )
     mgmt_fee_val = fmt_input(parse_cf(cf, MGMT_FEE_FIELD))
     carry_val    = fmt_input(parse_cf(cf, CARRY_FIELD))
     layers_raw   = parse_cf(cf, LAYERS_FIELD)
@@ -571,6 +550,26 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
 
     spv_fields_html = ""
     if is_spv:
+        data_room_field_html = ""
+        if sell:
+            _dr_raw = parse_cf(cf, DATA_ROOM_FIELD)
+            try:
+                _dr_cur = int(float(str(_dr_raw))) if _dr_raw not in (None, "") else None
+            except (ValueError, TypeError):
+                _dr_cur = None
+            _dr_yes = " selected" if _dr_cur == DATA_ROOM_YES_ID else ""
+            _dr_no  = " selected" if _dr_cur == DATA_ROOM_NO_ID else ""
+            _dr_ph  = "" if _dr_cur in (DATA_ROOM_YES_ID, DATA_ROOM_NO_ID) else " selected"
+            data_room_field_html = (
+                '<div class="field" style="margin-bottom:0">'
+                '<label>Data Room Available? <span style="color:#b91c1c">*</span></label>'
+                '<select name="data_room" required style="width:100%;padding:10px;'
+                'border:1px solid #ccc;border-radius:6px;font-size:14px;background:#fff">'
+                '<option value="" disabled' + _dr_ph + '>&mdash; Select &mdash;</option>'
+                '<option value="yes"' + _dr_yes + '>Yes</option>'
+                '<option value="no"' + _dr_no + '>No</option>'
+                "</select></div>"
+            )
         spv_fields_html = f'''
       <div style="background:#f0f7ff;border:1px solid #cce0ff;border-radius:8px;padding:14px 16px;margin-bottom:20px">
         <p style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:#1a4a8a;margin-bottom:12px">{"SPV Terms" if sell else "Maximum Acceptable SPV Terms"}</p>
@@ -587,6 +586,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
               {fe_options_html}
             </select>
           </div>
+          {data_room_field_html}
         </div>
         <div class="field-row">
           <div class="field" style="margin-bottom:0">
@@ -884,8 +884,6 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
           <input type="text" inputmode="numeric" name="max_size" value="{max_val}" step="1" placeholder="e.g. 10000000">
         </div>
       </div>
-
-      {data_room_row}
 
       <div class="field">
         <label>Current Public Notes</label>
