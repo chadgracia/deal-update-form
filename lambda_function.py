@@ -562,7 +562,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
             _dr_ph  = "" if _dr_cur in (DATA_ROOM_YES_ID, DATA_ROOM_NO_ID) else " selected"
             data_room_field_html = (
                 '<div class="field" style="margin-bottom:0">'
-                '<label>Data Room Available? <span style="color:#b91c1c">*</span></label>'
+                '<label>Data Room? <span style="color:#b91c1c">*</span></label>'
                 '<select name="data_room" required style="width:100%;padding:10px;'
                 'border:1px solid #ccc;border-radius:6px;font-size:14px;background:#fff">'
                 '<option value="" disabled' + _dr_ph + '>&mdash; Select &mdash;</option>'
