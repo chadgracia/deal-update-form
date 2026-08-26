@@ -91,6 +91,9 @@ SELLER_FEE_FIELD  = "custom_label_3940560"
 SHARE_COUNT_FIELD = "custom_label_3070843"
 REFRESH_FIELD     = "custom_label_3994687"
 DEAL_TYPE_FIELD   = "custom_label_1958"
+DATA_ROOM_FIELD   = "custom_label_3952402"
+DATA_ROOM_YES_ID  = 7038265
+DATA_ROOM_NO_ID   = 7038266
 STRUCTURE_FIELD   = "custom_label_3064360"
 COMPANY_PPS_FIELD = "custom_label_3064363"
 COMPANY_VAL_FIELD = "custom_label_3790429"
@@ -444,6 +447,27 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
     net_val      = fmt_input(parse_cf(cf, NET_FIELD))
     min_val      = fmt_thousands(parse_cf(cf, MIN_SIZE_FIELD))
     max_val      = fmt_thousands(parse_cf(cf, MAX_SIZE_FIELD))
+    data_room_row = ""
+    if sell:
+        _dr_raw = parse_cf(cf, DATA_ROOM_FIELD)
+        try:
+            _dr_cur = int(float(str(_dr_raw))) if _dr_raw not in (None, "") else None
+        except (ValueError, TypeError):
+            _dr_cur = None
+        _dr_yes = " selected" if _dr_cur == DATA_ROOM_YES_ID else ""
+        _dr_no  = " selected" if _dr_cur == DATA_ROOM_NO_ID else ""
+        _dr_ph  = "" if _dr_cur in (DATA_ROOM_YES_ID, DATA_ROOM_NO_ID) else " selected"
+        data_room_row = (
+            '<div class="field">'
+            '<label>Data Room Available? <span style="color:#b91c1c">*</span></label>'
+            '<select name="data_room" required '
+            'style="width:100%;padding:11px 12px;border:1px solid var(--line);'
+            'border-radius:9px;font-size:15px;background:#fff;">'
+            '<option value="" disabled' + _dr_ph + '>&mdash; Select &mdash;</option>'
+            '<option value="yes"' + _dr_yes + '>Yes</option>'
+            '<option value="no"' + _dr_no + '>No</option>'
+            "</select></div>"
+        )
     mgmt_fee_val = fmt_input(parse_cf(cf, MGMT_FEE_FIELD))
     carry_val    = fmt_input(parse_cf(cf, CARRY_FIELD))
     layers_raw   = parse_cf(cf, LAYERS_FIELD)
@@ -861,6 +885,8 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         </div>
       </div>
 
+      {data_room_row}
+
       <div class="field">
         <label>Current Public Notes</label>
         <div style="background:#f7f7f7;border:1px solid var(--line);border-radius:9px;padding:12px 14px;font-size:13px;color:#666;white-space:pre-wrap;line-height:1.5;">{summary_display}</div>
@@ -1100,6 +1126,11 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     if min_val:
         try: custom[MIN_SIZE_FIELD] = float(min_val)
         except ValueError: pass
+    data_room_val = params.get("data_room", "").strip().lower()
+    if data_room_val == "yes":
+        custom[DATA_ROOM_FIELD] = DATA_ROOM_YES_ID
+    elif data_room_val == "no":
+        custom[DATA_ROOM_FIELD] = DATA_ROOM_NO_ID
     if mgmt_fee_val:
         try: custom[MGMT_FEE_FIELD] = float(mgmt_fee_val)
         except ValueError: pass
