@@ -508,7 +508,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         hiive_price = parse_cf(ccf, HIIVE_PRICE_FIELD)
 
     if sell:
-        price_label   = "Net Price (your take-home after commission)"
+        price_label   = "Net Price (Before your fees and Rainmaker commission)"
         price_tooltip = "Net = the amount you receive after our commission is deducted."
         price_field   = "net"
         price_current = net_val
