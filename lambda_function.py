@@ -629,7 +629,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
             <input type="number" name="seller_fee" value="{seller_fee_val}" step="0.1" min="0" required placeholder="e.g. 5">
           </div>
           <div class="field" style="margin-bottom:0">
-            <label>Management Fee (%) <span style="color:#b91c1c">*</span></label>
+            <label>Managment Fee (%) <span style="color:#b91c1c">*</span></label>
             <input type="number" name="mgmt_fee" value="{mgmt_fee_val}" step="0.1" min="0" required placeholder="e.g. 2">
           </div>
           <div class="field" style="margin-bottom:0">
