@@ -274,12 +274,17 @@ def html_response(body_html: str, status: int = 200) -> dict:
     .field-row {{ display: flex; flex-wrap: wrap; gap: 12px; }}
     .field-row > .field {{ flex: 1 1 120px; min-width: 120px; }}
     label {{ display: block; font-size: 13px; font-weight: 600; color: #444; margin-bottom: 6px; }}
-    input[type=number], input[type=text] {{
+    input[type=number], input[type=text], input[type=date] {{
       width: 100%;
       padding: 10px 14px;
       border: 1px solid #ddd;
       border-radius: 8px;
       font-size: 15px;
+      font-family: inherit;
+      color: inherit;
+      background: #fff;
+      -webkit-appearance: none;
+      appearance: none;
       transition: border-color 0.2s;
     }}
     input:focus {{ outline: none; border-color: #1a1a1a; }}
@@ -588,9 +593,8 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
                 + sr_options_html +
                 "</select></div>"
                 '<div class="field" style="margin-bottom:0">'
-                '<label>Deadline to Commit <span style="color:#b91c1c">*</span></label>'
-                '<input type="date" name="deadline" required value="' + deadline_val + '" '
-                'style="width:100%;padding:10px;border:1px solid #ccc;border-radius:6px;font-size:14px;background:#fff">'
+                '<label>Deadline to Commit</label>'
+                '<input type="date" name="deadline" value="' + deadline_val + '">'
                 "</div>"
                 '<div class="field" style="margin-bottom:0">'
                 '<label>Data Room? <span style="color:#b91c1c">*</span></label>'
