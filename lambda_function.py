@@ -625,16 +625,16 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         </div>
         <div class="field-row">
           <div class="field" style="margin-bottom:0">
-            <label>One-Time Fee (%)</label>
-            <input type="number" name="seller_fee" value="{seller_fee_val}" step="0.1" placeholder="e.g. 5">
+            <label>One-Time Fee (%) <span style="color:#b91c1c">*</span></label>
+            <input type="number" name="seller_fee" value="{seller_fee_val}" step="0.1" min="0" required placeholder="e.g. 5">
           </div>
           <div class="field" style="margin-bottom:0">
-            <label>Management Fee (%)</label>
-            <input type="number" name="mgmt_fee" value="{mgmt_fee_val}" step="0.1" placeholder="e.g. 2">
+            <label>Management Fee (%) <span style="color:#b91c1c">*</span></label>
+            <input type="number" name="mgmt_fee" value="{mgmt_fee_val}" step="0.1" min="0" required placeholder="e.g. 2">
           </div>
           <div class="field" style="margin-bottom:0">
-            <label>Carry (%)</label>
-            <input type="number" name="carry" value="{carry_val}" step="0.1" placeholder="e.g. 20">
+            <label>Carry (%) <span style="color:#b91c1c">*</span></label>
+            <input type="number" name="carry" value="{carry_val}" step="0.1" min="0" required placeholder="e.g. 20">
           </div>
         </div>
       </div>'''
