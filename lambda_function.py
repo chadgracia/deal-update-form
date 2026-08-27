@@ -87,6 +87,8 @@ MGMT_FEE_FIELD    = "custom_label_3940558"
 CARRY_FIELD       = "custom_label_3940559"
 LAYERS_FIELD      = "custom_label_3938743"
 FUND_EXEMPT_FIELD = "custom_label_4006089"
+SELLER_ROLE_FIELD = "custom_label_3938748"
+DEADLINE_FIELD    = "custom_label_4006402"
 SELLER_FEE_FIELD  = "custom_label_3940560"
 SHARE_COUNT_FIELD = "custom_label_3070843"
 REFRESH_FIELD     = "custom_label_3994687"
@@ -472,6 +474,24 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
     )
     seller_fee_val = fmt_input(parse_cf(cf, SELLER_FEE_FIELD))
     share_val    = fmt_input(parse_cf(cf, SHARE_COUNT_FIELD))
+    sr_raw = parse_cf(cf, SELLER_ROLE_FIELD)
+    try:
+        sr_cur = str(int(float(str(sr_raw)))) if sr_raw not in (None, "") else ""
+    except (ValueError, TypeError):
+        sr_cur = ""
+    _SR_OPTS = [("7020357", "GP — syndicating new allocation"),
+                ("7000232", "GP — facilitating LP sale"),
+                ("7000231", "GP — selling own units"),
+                ("7205050", "GP — selling entire SPV"),
+                ("7000233", "LP — GP consent obtained"),
+                ("7000234", "LP — GP consent needed"),
+                ("7000235", "LP — platform holder")]
+    sr_options_html = '<option value="" disabled' + ("" if sr_cur else " selected") + '>&mdash; Select &mdash;</option>' + "".join(
+        f'<option value="{val}"{" selected" if val == sr_cur else ""}>{lbl}</option>'
+        for val, lbl in _SR_OPTS
+    )
+    _dl_raw = parse_cf(cf, DEADLINE_FIELD)
+    deadline_val = str(_dl_raw)[:10].replace("/", "-") if _dl_raw not in (None, "") else ""
 
     # Detect SPV structure
     structure_raw = parse_cf(cf, STRUCTURE_FIELD)
@@ -561,6 +581,17 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
             _dr_no  = " selected" if _dr_cur == DATA_ROOM_NO_ID else ""
             _dr_ph  = "" if _dr_cur in (DATA_ROOM_YES_ID, DATA_ROOM_NO_ID) else " selected"
             data_room_field_html = (
+                '<div class="field" style="margin-bottom:0">'
+                '<label>Seller Role <span style="color:#b91c1c">*</span></label>'
+                '<select name="seller_role" required style="width:100%;padding:10px;'
+                'border:1px solid #ccc;border-radius:6px;font-size:14px;background:#fff">'
+                + sr_options_html +
+                "</select></div>"
+                '<div class="field" style="margin-bottom:0">'
+                '<label>Deadline to Commit <span style="color:#b91c1c">*</span></label>'
+                '<input type="date" name="deadline" required value="' + deadline_val + '" '
+                'style="width:100%;padding:10px;border:1px solid #ccc;border-radius:6px;font-size:14px;background:#fff">'
+                "</div>"
                 '<div class="field" style="margin-bottom:0">'
                 '<label>Data Room? <span style="color:#b91c1c">*</span></label>'
                 '<select name="data_room" required style="width:100%;padding:10px;'
@@ -1141,6 +1172,13 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     if fund_exempt_val:
         try: custom[FUND_EXEMPT_FIELD] = int(fund_exempt_val)
         except ValueError: pass
+    seller_role_val = params.get("seller_role", "").strip()
+    if seller_role_val:
+        try: custom[SELLER_ROLE_FIELD] = int(seller_role_val)
+        except ValueError: pass
+    deadline_form_val = params.get("deadline", "").strip()
+    if deadline_form_val:
+        custom[DEADLINE_FIELD] = deadline_form_val
     if seller_fee_val:
         try: custom[SELLER_FEE_FIELD] = float(seller_fee_val)
         except ValueError: pass
@@ -1391,6 +1429,21 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
             ("Layers",      fmt_layers(parse_cf(current_cf, LAYERS_FIELD)),   fmt_layers(new_layers if new_layers is not None else parse_cf(current_cf, LAYERS_FIELD))),
             ("Fund Exemption", fmt_fe(parse_cf(current_cf, FUND_EXEMPT_FIELD)), fmt_fe(new_fe if new_fe is not None else parse_cf(current_cf, FUND_EXEMPT_FIELD))),
         ]
+        _SR_LABELS = {7020357: "GP — syndicating new allocation", 7000232: "GP — facilitating LP sale", 7000231: "GP — selling own units", 7205050: "GP — selling entire SPV", 7000233: "LP — GP consent obtained", 7000234: "LP — GP consent needed", 7000235: "LP — platform holder"}
+        def fmt_sr(val):
+            if val in (None, ""):
+                return "—"
+            try:
+                return _SR_LABELS.get(int(float(str(val))), str(val))
+            except (ValueError, TypeError):
+                return str(val)
+        def fmt_dl(val):
+            return str(val)[:10].replace("/", "-") if val not in (None, "") else "—"
+        new_sr = custom.get(SELLER_ROLE_FIELD)
+        new_dl = custom.get(DEADLINE_FIELD)
+        if sell:
+            rows.append(("Seller Role", fmt_sr(parse_cf(current_cf, SELLER_ROLE_FIELD)), fmt_sr(new_sr if new_sr is not None else parse_cf(current_cf, SELLER_ROLE_FIELD))))
+            rows.append(("Deadline", fmt_dl(parse_cf(current_cf, DEADLINE_FIELD)), fmt_dl(new_dl if new_dl is not None else parse_cf(current_cf, DEADLINE_FIELD))))
     rows.append(("Stage", old_stage, new_stage_name))
 
     # Plain-text fallback (preserve existing line-based format)
