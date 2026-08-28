@@ -18,6 +18,7 @@ import urllib.error
 import urllib.parse
 import os
 import hmac
+import html
 import hashlib
 import base64
 import boto3
@@ -440,7 +441,7 @@ def error_page(msg: str) -> dict:
 
 # ── Form page ─────────────────────────────────────────────────────────────────
 
-def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list = None) -> dict:
+def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list = None, new_url: str = "") -> dict:
     cf           = deal.get("custom_fields", {})
     sell         = is_sell(cf)
     side         = "Sell" if sell else "Buy"
@@ -939,6 +940,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
       </div>
     </form>
 
+    {f'<div class="unsub" style="margin-bottom:6px;"><a href="{new_url}">＋ Add a new buy or sell order</a></div>' if new_url else ''}
     <div class="unsub">
       <a href="{unsub_url}">Unsubscribe from deal update reminders</a>
     </div>
@@ -1005,6 +1007,77 @@ def handle_get(params: dict) -> dict:
         </p>
         """)
 
+    if action == "new":
+        person_id = params.get("person_id", "")
+        token     = params.get("token", "")
+        try:
+            pid = int(person_id)
+        except (ValueError, TypeError):
+            return error_page("Invalid link.")
+        if not verify_token(f"new:{pid}", token):
+            return error_page("Invalid or expired link.")
+
+        jwt = get_jwt()
+        p_result = call_pipeline_api("GET", f"/people/{pid}.json", jwt=jwt)
+        if p_result["status"] != 200:
+            return error_page("Contact not found.")
+        person = p_result["data"]
+        first_name = (person.get("first_name") or "").strip()
+
+        companies = {}
+        try:
+            s3  = boto3.client("s3")
+            obj = s3.get_object(Bucket="full-pipeline-cache", Key="deals.json")
+            data = json.loads(obj["Body"].read())
+            deals_list = data if isinstance(data, list) else (data.get("deals") or [])
+            for d in deals_list:
+                c = d.get("company") or {}
+                cid, cname = c.get("id"), (c.get("name") or "").strip()
+                if cid and cname:
+                    companies[cid] = cname
+        except Exception as e:
+            logger.warning(f"new-order: failed to load deals.json: {e}")
+
+        company_options = "".join(
+            f'<option value="{cid}">{html.escape(cname)}</option>'
+            for cid, cname in sorted(companies.items(), key=lambda kv: kv[1].lower())
+        )
+
+        body = f"""
+    <h1>New Order</h1>
+    <p class="subtitle">Hello{f" {first_name}" if first_name else ""}! Tell us what you'd like to buy or sell. You'll enter price and size on the next screen.</p>
+
+    <form method="POST">
+      <input type="hidden" name="new_person_id" value="{pid}">
+      <input type="hidden" name="new_token" value="{html.escape(token)}">
+      <input type="text" name="website" value="" style="position:absolute;left:-9999px;" tabindex="-1" autocomplete="off">
+
+      <div class="field">
+        <label>I want to</label>
+        <div style="display:flex;gap:24px;margin-top:6px;">
+          <label style="font-weight:normal;"><input type="radio" name="side" value="buy" required> Buy</label>
+          <label style="font-weight:normal;"><input type="radio" name="side" value="sell" required> Sell</label>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Company</label>
+        <select name="company_id" required style="width:100%;padding:10px;font-size:15px;">
+          <option value="">— Select a company —</option>
+          {company_options}
+        </select>
+      </div>
+
+      <div class="actions">
+        <button type="submit" name="submit_action" value="create" class="btn-primary">Continue →</button>
+      </div>
+    </form>
+    <p style="text-align:center;font-size:11px;color:#bbb;margin-top:16px;">
+      Reference only. Not an offer to buy or sell securities.
+    </p>
+    """
+        return html_response(body)
+
     deal_id_str = params.get("deal_id", "")
     token       = params.get("token", "")
     try:
@@ -1043,8 +1116,9 @@ def handle_get(params: dict) -> dict:
 
     contact_id = (deal.get("primary_contact") or {}).get("id", 0)
     unsub_url  = f"?action=unsubscribe&person_id={contact_id}&token={make_token(contact_id)}"
+    new_url    = f"?action=new&person_id={contact_id}&token={make_token(f'new:{contact_id}')}" if contact_id else ""
 
-    return render_form(deal, company_rec, unsub_url, all_deals)
+    return render_form(deal, company_rec, unsub_url, all_deals, new_url)
 
 
 # ── POST handler ──────────────────────────────────────────────────────────────
