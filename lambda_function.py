@@ -568,6 +568,43 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
                 rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0"><span style="color:#888">Approximate market price</span><span style="font-weight:500">${hiive_ref_f:,}/share</span></div>')
             except (ValueError, TypeError):
                 pass
+        # Counterparty presence. Firm-stage opposite-side deals, same company,
+        # excluding this deal. Never show a zero; buyers fall back to holder count.
+        try:
+            _cp_count = 0
+            if all_deals and company_id:
+                for d in all_deals:
+                    if d.get("id") == deal_id:
+                        continue
+                    if (d.get("deal_stage") or {}).get("id") != FIRM_STAGE_ID:
+                        continue
+                    if (d.get("company") or {}).get("id") != company_id:
+                        continue
+                    if is_sell(d.get("custom_fields", {})) == sell:
+                        continue
+                    _cp_count += 1
+            if _cp_count > 0:
+                _cp_label = "Active buyers here" if sell else "Active sellers here"
+                rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #eee"><span style="color:#888">{_cp_label}</span><span style="font-weight:500">{_cp_count}</span></div>')
+            elif not sell:
+                _h_name = ((deal.get("company") or {}).get("name") or "").strip()
+                _h_count = None
+                if _h_name:
+                    try:
+                        _h_obj = boto3.client("s3").get_object(Bucket="full-pipeline-cache", Key="holder_counts.json")
+                        _h_counts = (json.loads(_h_obj["Body"].read().decode("utf-8")).get("counts") or {})
+                        _h_target = _h_name.lower()
+                        for _hn, _hv in _h_counts.items():
+                            if _hn.strip().lower() == _h_target:
+                                _h_count = _hv
+                                break
+                    except Exception:
+                        _h_count = None
+                if isinstance(_h_count, (int, float)) and _h_count > 0:
+                    rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #eee"><span style="color:#888">Holders we&rsquo;re in touch with</span><span style="font-weight:500">{int(_h_count)}</span></div>')
+        except Exception as e:
+            logger.warning(f"counterparty line failed: {e}")
+
         if rows:
             val_html = f'''
         <div class="market-box" style="background:#f9f9f9;border-color:#ddd;color:#444;margin-bottom:24px">
