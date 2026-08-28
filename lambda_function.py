@@ -107,6 +107,7 @@ HIIVE_ASK_DATE_FIELD = "custom_label_3997299"
 HIIVE_BID_DATE_FIELD = "custom_label_3997300"
 DIRECT_STRUCTURE_ID  = 6250090
 SELL_TYPE_ID      = 5011675
+BUY_TYPE_ID       = 5077819
 
 OBSOLETE_STAGE_ID = 2348038
 FIRM_STAGE_ID     = 111800
@@ -1142,6 +1143,97 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
 
     if params.get("qa") == "answer":
         return handle_qa_answer_submit(params)
+
+    if params.get("submit_action") == "create" and params.get("new_person_id"):
+        # Honeypot: bots that fill the hidden field get a fake success, no write
+        if params.get("website", "").strip():
+            return success_page("Order received")
+        try:
+            new_pid = int(params.get("new_person_id", ""))
+            new_cid = int(params.get("company_id", ""))
+        except (ValueError, TypeError):
+            return error_page("Invalid submission.")
+        if not verify_token(f"new:{new_pid}", params.get("new_token", "")):
+            return error_page("Invalid or expired link.")
+        side = params.get("side", "").strip().lower()
+        if side not in ("buy", "sell"):
+            return error_page("Please choose Buy or Sell.")
+
+        # Duplicate lock: one open order per person/company/side
+        s3_lock = boto3.client("s3")
+        lock_key = f"new-order-locks/{new_pid}-{new_cid}-{side}.json"
+        try:
+            s3_lock.head_object(Bucket="gracia-deal-qa", Key=lock_key)
+            return html_response(
+                '<h1>Already received</h1>'
+                '<p class="subtitle" style="margin-top:12px">We already have this order on file. '
+                'If you would like to change it, just reply to any of our emails and we will '
+                'send you an update link.</p>'
+            )
+        except Exception:
+            pass
+
+        jwt_new = get_jwt()
+        p_result = call_pipeline_api("GET", f"/people/{new_pid}.json", jwt=jwt_new)
+        if p_result["status"] != 200 or not isinstance(p_result["data"], dict):
+            return error_page("Contact not found.")
+        new_person = p_result["data"]
+        new_owner_id = new_person.get("owner_id")
+
+        c_result = call_pipeline_api("GET", f"/companies/{new_cid}.json", jwt=jwt_new)
+        if c_result["status"] != 200 or not isinstance(c_result["data"], dict):
+            return error_page("Company not found.")
+        new_company_name = (c_result["data"].get("name") or "").strip() or "Unknown"
+
+        side_label = "Buy" if side == "buy" else "Sell"
+        new_type_id = BUY_TYPE_ID if side == "buy" else SELL_TYPE_ID
+        create_payload = {"deal": {
+            "name": f"{new_company_name}: {side_label}",
+            "company_id": new_cid,
+            "primary_contact_id": new_pid,
+            "deal_stage_id": INQUIRY_STAGE_ID,
+            "custom_fields": {DEAL_TYPE_FIELD: [new_type_id]},
+        }}
+        if new_owner_id:
+            create_payload["deal"]["user_id"] = new_owner_id
+
+        create_result = call_pipeline_api("POST", "/deals.json", create_payload, jwt=jwt_new)
+        created = create_result.get("data") if isinstance(create_result.get("data"), dict) else {}
+        if create_result["status"] not in (200, 201) or not created.get("id"):
+            logger.error(f"new-order create failed: {create_result}")
+            return error_page("Sorry — we could not create your order. Please reply to our email and we will set it up for you.")
+        new_deal_id = created["id"]
+
+        try:
+            s3_lock.put_object(
+                Bucket="gracia-deal-qa", Key=lock_key,
+                Body=json.dumps({
+                    "deal_id": new_deal_id,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }).encode(),
+            )
+        except Exception as e:
+            logger.warning(f"new-order lock write failed: {e}")
+
+        new_person_name = (new_person.get("full_name") or f"{new_person.get('first_name', '')} {new_person.get('last_name', '')}").strip() or f"Person {new_pid}"
+        new_deal_url = f"https://app.pipelinecrm.com/deals/{new_deal_id}"
+        send_email(
+            CHAD_EMAIL,
+            f"New {side_label} order via form: {new_company_name} ({new_person_name})",
+            f"{new_person_name} created a new {side_label} order for {new_company_name}.\n"
+            f"Deal #{new_deal_id} (Inquiry stage): {new_deal_url}",
+            html=email_html(
+                f'<p style="margin:0 0 12px 0;"><strong>{html.escape(new_person_name)}</strong> created a new '
+                f'<strong>{side_label}</strong> order for <strong>{html.escape(new_company_name)}</strong>.</p>'
+                f'<p style="margin:0;font-size:13px;"><a href="{new_deal_url}" style="{EMAIL_LINK_STYLE}">Open deal {new_deal_id}</a></p>'
+            ),
+        )
+
+        return {
+            "statusCode": 302,
+            "headers": {"Location": f"?deal_id={new_deal_id}&token={make_token(new_deal_id)}"},
+            "body": "",
+        }
 
     deal_id_str   = params.get("deal_id", "")
     submit_action = params.get("submit_action", "confirm")
