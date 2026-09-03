@@ -1175,6 +1175,9 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
 
     logger.info(f"POST parsed fields: {list(params.keys())}")
 
+    if params.get("signup") == "weekly":
+        return handle_weekly_signup(params)
+
     if params.get("qa") == "submit":
         return handle_qa_submit(params)
 
@@ -1756,6 +1759,63 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     )
 
     return success_page("Update received!")
+
+
+def handle_weekly_signup(params: dict) -> dict:
+    """Anonymous visitor on a public deal page asked to join the weekly trades list.
+    No CRM write — just email Chad for manual review. Honeypot + one-per-day dedup."""
+    # Honeypot: bots that fill the hidden field get a fake success, no email
+    if params.get("website", "").strip():
+        return _weekly_signup_success(params.get("deal_id", ""))
+
+    email = (params.get("signup_email", "") or "").strip()
+    if "@" not in email or len(email) > 254:
+        return error_page("Please enter a valid email address.")
+
+    deal_id   = (params.get("deal_id", "") or "").strip()
+    deal_name = (params.get("deal_name", "") or "").strip()
+
+    # One email per address per UTC day: atomic S3 lock stops double-clicks and
+    # repeat-POST bots from flooding the inbox.
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    digest = hashlib.sha256(email.lower().encode()).hexdigest()
+    lock_key = f"weekly-signups/{day}/{digest}.lock"
+    s3 = boto3.client("s3", region_name="us-east-1")
+    try:
+        s3.put_object(Bucket=QA_BUCKET, Key=lock_key, Body=email.lower().encode(), IfNoneMatch="*")
+    except s3.exceptions.ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        if code in ("PreconditionFailed", "412") or status == 412:
+            return _weekly_signup_success(deal_id)
+        raise
+
+    safe_email = html.escape(email)
+    safe_deal  = html.escape(deal_name) if deal_name else html.escape(deal_id)
+    send_email(
+        CHAD_EMAIL,
+        f"New weekly-list signup: {email}",
+        f"Email: {email}\nSource deal: {deal_name} (id {deal_id})\nPage: https://trades.graciagroup.com/deal/{deal_id}\n\nManually add to Pipeline / weekly mailer list if legitimate.",
+        html=email_html(
+            f"<p><strong>New weekly trades list signup</strong></p>"
+            f"<p>Email: <a href='mailto:{safe_email}' style='{EMAIL_LINK_STYLE}'>{safe_email}</a><br>"
+            f"Source deal: {safe_deal} (id {html.escape(deal_id)})<br>"
+            f"Page: <a href='https://trades.graciagroup.com/deal/{html.escape(deal_id)}' style='{EMAIL_LINK_STYLE}'>deal page</a></p>"
+            f"<p>Manually add to Pipeline / weekly mailer list if legitimate.</p>"
+        ),
+    )
+    return _weekly_signup_success(deal_id)
+
+
+def _weekly_signup_success(deal_id: str) -> dict:
+    back_url = f"https://trades.graciagroup.com/deal/{deal_id}" if deal_id else TRADES_URL
+    body = f"""
+    <div class="success-icon">✓</div>
+    <h1 style="text-align:center">You're on the list</h1>
+    <p class="subtitle" style="text-align:center;margin-top:8px">The next weekly trades email goes out Monday. Returning you to the deal…</p>
+    <script>setTimeout(function() {{ window.location.href = '{back_url}'; }}, 2500);</script>
+    """
+    return html_response(body)
 
 
 def handle_qa_submit(params: dict) -> dict:
