@@ -76,6 +76,7 @@ QA_ANSWER = {
     "no_data_room":  {"type": "bool"},
     "accept_common": {"type": "bool"},
     "move_bid_up":   {"type": "offer"},
+    "fund_exemption": {"type": "choice", "options": ["3(c)(1)", "3(c)(7)", "Other", "Don't know"]},
 }
 TRADES_URL          = "https://trades.graciagroup.com"
 PIPELINE_JWT_BUCKET = "pipeline-token"
