@@ -54,6 +54,7 @@ QA_TEXT = {
     "no_data_room": "Do you need access to a data room to commit?",
     "accept_common":"Would you accept common shares?",
     "move_bid_up":  "Would you move your bid up?",
+    "fund_exemption": "What is the fund exemption — 3(c)(1) or 3(c)(7)?",
 }
 QA_ANSWER = {
     "accept_bid":    {"type": "offer"},
@@ -2209,6 +2210,8 @@ def handle_qa_answer_page(qs: dict) -> dict:
             if _fm != "": _bits.append(f"management fee {_fm}%")
             if _fc != "": _bits.append(f"carry {_fc}%")
             _proposed = ("Counterparty proposes: " + ", ".join(_bits)) if _bits else "Counterparty's proposed fee structure"
+            if record.get("bid_size", ""):
+                _proposed += f' on a ticket of {record.get("bid_size")}'
             rows += (
                 f'<div class="offer">{_proposed}</div>'
                 f'<label class="opt"><input type="radio" name="a_{qid}" value="Accept"> Accept</label>'
