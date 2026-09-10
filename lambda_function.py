@@ -938,6 +938,11 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
     <form method="POST">
       <input type="hidden" name="deal_id" value="{deal_id}">
 
+      <button type="submit" name="submit_action" value="cancel" class="btn-cancel"
+        style="width:100%;margin-bottom:20px;"
+        onclick="return confirm('Cancel and remove this deal? This cannot be undone.')">
+        ✕ Cancel — Remove Deal</button>
+
       <div class="field">
         <label>{price_label}</label>
         <input type="number" name="{price_field}" value="{price_current}" step="any" placeholder="e.g. 45.50">
