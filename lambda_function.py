@@ -306,9 +306,19 @@ def html_response(body_html: str, status: int = 200) -> dict:
     }}
     .btn-cancel {{
       flex: 1;
-      background: #fff;
-      color: #666;
-      border: 1px solid #ddd;
+      background: #fdecec;
+      color: #a03030;
+      border: 1px solid #e0a8a8;
+      padding: 13px;
+      border-radius: 8px;
+      font-size: 15px;
+      cursor: pointer;
+    }}
+    .btn-hold {{
+      flex: 1;
+      background: #fdf3d8;
+      color: #8a6d1a;
+      border: 1px solid #e0cf98;
       padding: 13px;
       border-radius: 8px;
       font-size: 15px;
@@ -868,7 +878,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
       form.addEventListener('submit', function(e) {{
         if (bypass) return;
         var s = e.submitter;
-        if (s && s.value === 'cancel') return;
+        if (s && (s.value === 'cancel' || s.value === 'hold')) return;
         var cur = priceInput ? priceInput.value : '';
         if (cur === initialPrice) {{
           e.preventDefault();
@@ -938,10 +948,14 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
     <form method="POST">
       <input type="hidden" name="deal_id" value="{deal_id}">
 
-      <button type="submit" name="submit_action" value="cancel" class="btn-cancel"
-        style="width:100%;margin-bottom:20px;"
-        onclick="return confirm('Cancel and remove this deal? This cannot be undone.')">
-        ✕ Cancel — Remove Deal</button>
+      <div style="display:flex;gap:12px;margin-bottom:20px;">
+        <button type="submit" name="submit_action" value="hold" class="btn-hold"
+          onclick="return confirm('Put this deal on hold?')">
+          ⏸ Put on Hold</button>
+        <button type="submit" name="submit_action" value="cancel" class="btn-cancel"
+          onclick="return confirm('Cancel and remove this deal? This cannot be undone.')">
+          ✕ Cancel — Remove Deal</button>
+      </div>
 
       <div class="field">
         <label>{price_label}</label>
@@ -1291,6 +1305,27 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         return error_page("Invalid submission.")
 
     jwt = get_jwt()
+
+    if submit_action == "hold":
+        deal_url = f"https://app.pipelinecrm.com/deals/{deal_id}"
+        result = call_pipeline_api("PUT", f"/deals/{deal_id}.json",
+                                   {"deal": {"deal_stage_id": 2094373}}, jwt=jwt)
+        if result["status"] != 200:
+            return error_page("Could not put the deal on hold. Please try again or contact us.")
+        send_email(
+            CHAD_EMAIL,
+            f"Deal put on HOLD via update form: deal {deal_id}",
+            f"The client clicked PUT ON HOLD — deal {deal_id} stage set to Hold.\n"
+            f"Pipeline: {deal_url}",
+            html=email_html(
+                f'<p style="margin:0 0 12px 0;">The client clicked '
+                f'<strong>PUT ON HOLD</strong> — deal {deal_id} stage set to '
+                f'<strong>Hold</strong>.</p>'
+                f'<p style="margin:0;font-size:13px;">'
+                f'<a href="{deal_url}" style="{EMAIL_LINK_STYLE}">Open deal {deal_id}</a></p>'
+            )
+        )
+        return success_page("Deal put on hold")
 
     if submit_action == "cancel":
         deal_url = f"https://app.pipelinecrm.com/deals/{deal_id}"
