@@ -160,12 +160,13 @@ def send_email(to_address: str, subject: str, body: str, html: str = None):
     if html:
         body_block["Html"] = {"Data": html}
     ses.send_email(
-        Source=SES_SENDER,
+        Source=f'"Chad Gracia" <cgracia@graciagroup.com>',
         Destination={"ToAddresses": [to_address]},
         Message={
             "Subject": {"Data": subject},
             "Body":    body_block
-        }
+        },
+        ReplyToAddresses=[CHAD_EMAIL],
     )
 
 
