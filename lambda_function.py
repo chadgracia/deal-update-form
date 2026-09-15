@@ -94,6 +94,7 @@ SELLER_ROLE_FIELD = "custom_label_3938748"
 DEADLINE_FIELD    = "custom_label_4006402"
 SELLER_FEE_FIELD  = "custom_label_3940560"
 SHARE_COUNT_FIELD = "custom_label_3070843"
+SHARE_CLASS_FIELD = "custom_label_3064330"
 REFRESH_FIELD     = "custom_label_3994687"
 DEAL_TYPE_FIELD   = "custom_label_1958"
 DATA_ROOM_FIELD   = "custom_label_3952402"
@@ -494,6 +495,17 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
     )
     seller_fee_val = fmt_input(parse_cf(cf, SELLER_FEE_FIELD))
     share_val    = fmt_input(parse_cf(cf, SHARE_COUNT_FIELD))
+    sc_raw = parse_cf(cf, SHARE_CLASS_FIELD)
+    try:
+        sc_cur = str(int(float(str(sc_raw)))) if sc_raw not in (None, "") else ""
+    except (ValueError, TypeError):
+        sc_cur = ""
+    _SC_OPTS = [("", "— Select —"), ("5077831", "Common"), ("5077834", "Preferred"),
+                ("5077912", "Mixed"), ("5077915", "Any")]
+    share_class_options_html = "".join(
+        f'<option value="{val}"{" selected" if val == sc_cur else ""}>{lbl}</option>'
+        for val, lbl in _SC_OPTS
+    )
     sr_raw = parse_cf(cf, SELLER_ROLE_FIELD)
     try:
         sr_cur = str(int(float(str(sr_raw)))) if sr_raw not in (None, "") else ""
@@ -965,9 +977,17 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
 
       {hiive_btn_html}
 
-      <div class="field">
-        <label>Number of Shares</label>
-        <input type="number" name="share_count" value="{share_val}" step="1" placeholder="e.g. 100000">
+      <div class="field-row" style="margin-bottom:20px">
+        <div class="field" style="margin-bottom:0">
+          <label>Number of Shares</label>
+          <input type="number" name="share_count" value="{share_val}" step="1" placeholder="e.g. 100000">
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <label>Share Class <span style="color:#b91c1c">*</span></label>
+          <select name="share_class" required style="width:100%;padding:10px;border:1px solid #ccc;border-radius:6px;font-size:14px;background:#fff">
+            {share_class_options_html}
+          </select>
+        </div>
       </div>
 
       <div class="field-row" style="margin-bottom:20px">
@@ -1369,6 +1389,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     gross_val    = params.get("gross", "").strip()
     net_val      = params.get("net", "").strip()
     share_val    = params.get("share_count", "").strip().replace(",", "")
+    share_class_val = params.get("share_class", "").strip()
     min_val      = params.get("min_size", "").strip().replace(",", "")
     max_val      = params.get("max_size", "").strip().replace(",", "")
     mgmt_fee_val = params.get("mgmt_fee", "").strip()
@@ -1404,6 +1425,9 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         except ValueError: pass
     if share_val:
         try: custom[SHARE_COUNT_FIELD] = float(share_val)
+        except ValueError: pass
+    if share_class_val:
+        try: custom[SHARE_CLASS_FIELD] = int(share_class_val)
         except ValueError: pass
     if min_val:
         try: custom[MIN_SIZE_FIELD] = float(min_val)
