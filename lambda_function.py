@@ -645,8 +645,8 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
                 + sr_options_html +
                 "</select></div>"
                 '<div class="field" style="margin-bottom:0">'
-                '<label>Deadline to Commit</label>'
-                '<input type="date" name="deadline" value="' + deadline_val + '">'
+                '<label>Deadline to Commit <span style="color:#b91c1c">*</span></label>'
+                '<input type="date" name="deadline" value="' + deadline_val + '" required>'
                 "</div>"
                 '<div class="field" style="margin-bottom:0">'
                 '<label>Data Room? <span style="color:#b91c1c">*</span></label>'
@@ -662,8 +662,8 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         <p style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:#1a4a8a;margin-bottom:12px">{"SPV Terms" if sell else "Maximum Acceptable SPV Terms"}</p>
         <div class="field-row" style="margin-bottom:12px">
           <div class="field" style="margin-bottom:0">
-            <label>Number of Layers</label>
-            <select name="layers" style="width:100%;padding:10px;border:1px solid #ccc;border-radius:6px;font-size:14px;background:#fff">
+            <label>Number of Layers <span style="color:#b91c1c">*</span></label>
+            <select name="layers" required style="width:100%;padding:10px;border:1px solid #ccc;border-radius:6px;font-size:14px;background:#fff">
               {layers_options_html}
             </select>
           </div>
@@ -972,11 +972,11 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
 
       <div class="field-row" style="margin-bottom:20px">
         <div class="field" style="margin-bottom:0">
-          <label>Minimum Size ($)</label>
+          <label>Minimum Size ($) <span style="color:#b91c1c">*</span></label>
           <input type="text" inputmode="numeric" name="min_size" value="{min_val}" step="1" placeholder="e.g. 100000" required>
         </div>
         <div class="field" style="margin-bottom:0">
-          <label>Maximum Size ($)</label>
+          <label>Maximum Size ($) <span style="color:#b91c1c">*</span></label>
           <input type="text" inputmode="numeric" name="max_size" value="{max_val}" step="1" placeholder="e.g. 10000000" required>
         </div>
       </div>
