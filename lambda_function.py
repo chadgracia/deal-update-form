@@ -950,10 +950,10 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
       <input type="hidden" name="deal_id" value="{deal_id}">
 
       <div style="display:flex;gap:12px;margin-bottom:20px;">
-        <button type="submit" name="submit_action" value="hold" class="btn-hold"
+        <button type="submit" name="submit_action" value="hold" class="btn-hold" formnovalidate
           onclick="return confirm('Put this deal on hold?')">
           ⏸ Put on Hold</button>
-        <button type="submit" name="submit_action" value="cancel" class="btn-cancel"
+        <button type="submit" name="submit_action" value="cancel" class="btn-cancel" formnovalidate
           onclick="return confirm('Cancel and remove this deal? This cannot be undone.')">
           ✕ Cancel — Remove Deal</button>
       </div>
@@ -973,11 +973,11 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
       <div class="field-row" style="margin-bottom:20px">
         <div class="field" style="margin-bottom:0">
           <label>Minimum Size ($)</label>
-          <input type="text" inputmode="numeric" name="min_size" value="{min_val}" step="1" placeholder="e.g. 100000">
+          <input type="text" inputmode="numeric" name="min_size" value="{min_val}" step="1" placeholder="e.g. 100000" required>
         </div>
         <div class="field" style="margin-bottom:0">
           <label>Maximum Size ($)</label>
-          <input type="text" inputmode="numeric" name="max_size" value="{max_val}" step="1" placeholder="e.g. 10000000">
+          <input type="text" inputmode="numeric" name="max_size" value="{max_val}" step="1" placeholder="e.g. 10000000" required>
         </div>
       </div>
 
@@ -996,7 +996,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
 
       <div class="btn-row">
         <button type="submit" name="submit_action" value="confirm" class="btn-primary">✓ Confirm / Update</button>
-        <button type="submit" name="submit_action" value="cancel" class="btn-cancel">✕ Cancel — Remove Deal</button>
+        <button type="submit" name="submit_action" value="cancel" class="btn-cancel" formnovalidate>✕ Cancel — Remove Deal</button>
       </div>
     </form>
 
