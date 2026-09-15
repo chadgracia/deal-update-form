@@ -994,6 +994,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         <div class="field" style="margin-bottom:0">
           <label>Minimum Size ($) <span style="color:#b91c1c">*</span></label>
           <input type="text" inputmode="numeric" name="min_size" value="{min_val}" step="1" placeholder="e.g. 100000" required>
+          <p style="font-size:12px;color:#888;margin:4px 0 0 0;">Buyers searching below this amount won't see your deal — e.g. set $1M and a buyer looking to invest $750K never sees it.</p>
         </div>
         <div class="field" style="margin-bottom:0">
           <label>Maximum Size ($) <span style="color:#b91c1c">*</span></label>
