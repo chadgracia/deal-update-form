@@ -48,7 +48,7 @@ QA_TEXT = {
     "data_room_avail": "Is a data room available for diligence?",
     "accept_fund":  "Would you accept a fund structure?",
     "cash_on_hand": "Do you have cash on hand?",
-    "qp_accredited":"Are you a QP or accredited?",
+    "qp_accredited":"What is your investor qualification level?",
     "iqf_done":     "Have you completed the IQF with Rainmaker?",
     "on_cap_table": "Are you already on the cap table?",
     "no_data_room": "Do you need access to a data room to commit?",
@@ -70,7 +70,7 @@ QA_ANSWER = {
     "data_room_avail": {"type": "bool"},
     "accept_fund":   {"type": "bool"},
     "cash_on_hand":  {"type": "bool"},
-    "qp_accredited": {"type": "choice", "options": ["QP", "Accredited", "Neither"]},
+    "qp_accredited": {"type": "choice", "options": ["Qualified Purchaser", "Qualified Client", "Accredited", "None of these"]},
     "iqf_done":      {"type": "bool"},
     "on_cap_table":  {"type": "bool"},
     "no_data_room":  {"type": "bool"},
@@ -2245,7 +2245,7 @@ def handle_qa_answer_page(qs: dict) -> dict:
         if qid == "accept_bid":
             qtext = f"Would you accept this {offer_word}?"
         elif qid == "qp_accredited":
-            qtext = "Are you a Qualified Purchaser ($10M+ in assets) or an accredited investor ($1M+ in assets)?"
+            qtext = "Which do you qualify as: Qualified Purchaser ($5M+ in investments, or $25M+ entity), Qualified Client ($2.2M+ net worth), or Accredited Investor ($1M+ net worth excluding primary residence, or $200K+ income)?"
         rows += f'<div class="field"><label>{qtext}</label>'
         if atype == "bool":
             rows += (
