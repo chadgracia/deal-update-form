@@ -2063,6 +2063,53 @@ def handle_qa_answer_submit(params: dict) -> dict:
             logger.error(f"opt-out: Chad notice failed for {deal_id}: {e}")
         return success_page("Done — you won't receive question requests on this deal.")
 
+    # Deal status action: counterparty says the deal is on hold or cancelled.
+    # Consume the link, notify the questioner and Chad. The Pipeline stage is NOT
+    # changed automatically — Chad updates it from the notification email.
+    deal_action = (params.get("deal_action") or "").strip()
+    if deal_action in ("hold", "cancel"):
+        record["status"] = "answered"
+        record["deal_action"] = deal_action
+        record["answered_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            s3.put_object(Bucket=QA_BUCKET, Key=f"{deal_id}/{set_id}.json",
+                          Body=json.dumps(record).encode(), ContentType="application/json")
+        except Exception as e:
+            logger.error(f"deal-action: failed to update QA record {deal_id}/{set_id}: {e}")
+        general_note = (params.get("o_general", "") or "").strip()
+        if deal_action == "hold":
+            status_line   = "placed this deal on hold"
+            asker_subject = f"Update on {deal_name}: on hold"
+            chad_subject  = f"Deal HOLD via Q&A: {deal_name} (#{deal_id})"
+        else:
+            status_line   = "cancelled this deal"
+            asker_subject = f"Update on {deal_name}: no longer available"
+            chad_subject  = f"Deal CANCEL via Q&A: {deal_name} (#{deal_id})"
+        if buyer_email:
+            hello = f"Hi {buyer_name.split()[0]}," if buyer_name else "Hi,"
+            inner = (
+                f'<h2 style="margin:0 0 4px 0;font-size:18px;color:#111;">{deal_name}</h2>'
+                f'<p style="margin:0 0 16px 0;color:#4b5563;font-size:14px;">Rather than answering your questions, the counterparty has {status_line}.</p>'
+                '<p style="margin:0;color:#4b5563;font-size:13px;">We\'ll let you know if it comes back to market. For similar opportunities, contact Chad Gracia at '
+                '<a href="mailto:cgracia@rainmakersecurities.com">cgracia@rainmakersecurities.com</a>.</p>'
+            )
+            plain = (f"{hello}\n\nRather than answering your questions, the counterparty has {status_line} "
+                     f"({deal_name}).\n\nWe'll let you know if it comes back to market. For similar opportunities, "
+                     "contact Chad Gracia at cgracia@rainmakersecurities.com.")
+            send_email(buyer_email, asker_subject, plain, html=email_html(inner))
+        pipeline_link = f"https://app.pipelinecrm.com/deals/{deal_id}"
+        chad_plain = (
+            f"The counterparty on {deal_name} (deal {deal_id}) responded to the Q&A request by choosing "
+            f"'{'This deal is on hold' if deal_action == 'hold' else 'Cancel this deal'}'.\n\n"
+            f"Questioner: {buyer_name or '—'} <{buyer_email or '—'}>\nAnswerer: <{seller_email or '—'}>\n"
+            + (f"\nPrivate note: {general_note}\n" if general_note else "")
+            + f"\nThe questioner was notified. The Pipeline stage was NOT changed — update it here:\n{pipeline_link}"
+        )
+        send_email(CHAD_EMAIL, chad_subject, chad_plain)
+        return success_page("Done — the deal is marked on hold and the questioner has been notified."
+                            if deal_action == "hold"
+                            else "Done — the deal is cancelled and the questioner has been notified.")
+
     answers, public_lines, priv_lines = {}, [], []
     for qid in record.get("question_ids", []):
         a       = (params.get(f"a_{qid}", "") or "").strip()
@@ -2312,6 +2359,10 @@ def handle_qa_answer_page(qs: dict) -> dict:
         ".feelbl input { width:110px; }"
         ".btn-submit { margin-top:8px; padding:12px 20px; border:none; border-radius:8px;"
         " background:#1a1a1a; color:#fff; font-size:15px; cursor:pointer; }"
+        ".actrow { margin-top:14px; display:flex; gap:10px; flex-wrap:wrap; }"
+        ".btn-act { padding:9px 14px; border:1px solid #d1d5db; border-radius:8px;"
+        " background:#fff; color:#374151; font-size:13px; cursor:pointer; }"
+        ".btn-cancel { border-color:#fca5a5; color:#b91c1c; }"
         ".btn-optout { display:block; margin-top:12px; background:none; border:none;"
         " color:#888; font-size:13px; text-decoration:underline; cursor:pointer; padding:4px 0; }"
         "input[type=text], input[type=number] { margin-top:6px; font-size:15px; }"
@@ -2344,6 +2395,10 @@ def handle_qa_answer_page(qs: dict) -> dict:
         f'<div class="field"><label>Notes (sent privately to Gracia Group)</label>'
         f'<textarea name="o_general" rows="3" placeholder="Anything you want Gracia Group to know — or forward to the {asker_role}"></textarea></div>'
         f'<button type="submit" class="btn-submit">Send answers</button>'
+        f'<div class="actrow">'
+        f'<button type="submit" name="deal_action" value="hold" class="btn-act" onclick="return confirm(\'Mark this deal as on hold? The {asker_role} will be notified and no answers will be sent.\')">This deal is on hold</button>'
+        f'<button type="submit" name="deal_action" value="cancel" class="btn-act btn-cancel" onclick="return confirm(\'Cancel this deal? The {asker_role} will be notified and no answers will be sent.\')">Cancel this deal</button>'
+        f'</div>'
         f'<button type="submit" name="optout" value="1" class="btn-optout" onclick="return confirm(\'Stop receiving question requests for this deal?\')">Do not send me counterparty questions</button>'
         f'</form>'
     ) + style
