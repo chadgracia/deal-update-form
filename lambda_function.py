@@ -2115,17 +2115,27 @@ def handle_qa_answer_submit(params: dict) -> dict:
         a       = (params.get(f"a_{qid}", "") or "").strip()
         counter = (params.get(f"c_{qid}", "") or "").strip()
         note    = (params.get(f"o_{qid}", "") or "").strip()
-        # A "fees" answer counters with three numbers rather than one field; fold them
-        # into the counter string so the email and record pipeline stay unchanged.
+        # A "fees" answer: Accept / Non-negotiable / Counter. Counters fold three
+        # numbers (+ optional investment minimum) into the counter string so the
+        # email and record pipeline stay unchanged.
         if QA_ANSWER.get(qid, {}).get("type") == "fees" and not counter:
-            _m = (params.get(f"f_man_{qid}", "") or "").strip()
-            _c = (params.get(f"f_carry_{qid}", "") or "").strip()
-            _o = (params.get(f"f_once_{qid}", "") or "").strip()
-            _p = []
-            if _o: _p.append(f"one-time fee {_o}%")
-            if _m: _p.append(f"management fee {_m}%")
-            if _c: _p.append(f"carry {_c}%")
-            counter = ", ".join(_p)
+            _m   = (params.get(f"f_man_{qid}", "") or "").strip()
+            _c   = (params.get(f"f_carry_{qid}", "") or "").strip()
+            _o   = (params.get(f"f_once_{qid}", "") or "").strip()
+            _min = (params.get(f"f_min_{qid}", "") or "").strip()
+            if a == "Non-negotiable":
+                _orig = (params.get(f"orig_{qid}", "") or "").strip()
+                a = "Terms non-negotiable — original terms stand" + (f" ({_orig})" if _orig else "")
+            else:
+                if a == "Counter":
+                    a = ""
+                _p = []
+                if _o: _p.append(f"one-time fee {_o}%")
+                if _m: _p.append(f"management fee {_m}%")
+                if _c: _p.append(f"carry {_c}%")
+                counter = ", ".join(_p)
+                if counter and _min:
+                    counter += f"; applies for investment minimum of ${_min.lstrip('$')}"
         answers[qid] = {"answer": a, "counter": counter, "note": note}
         pub = []
         if a: pub.append(a)
@@ -2316,28 +2326,46 @@ def handle_qa_answer_page(qs: dict) -> dict:
                 f'<input type="text" name="c_{qid}" placeholder="Or counter at $___/share">'
             )
         elif atype == "fees":
-            _fm = record.get("fee_man", "")
-            _fc = record.get("fee_carry", "")
-            _fo = record.get("fee_onetime", "")
-            _bits = []
-            if _fo != "": _bits.append(f"one-time fee {_fo}%")
-            if _fm != "": _bits.append(f"management fee {_fm}%")
-            if _fc != "": _bits.append(f"carry {_fc}%")
-            _proposed = ("Counterparty proposes: " + ", ".join(_bits)) if _bits else "Counterparty's proposed fee structure"
-            if record.get("bid_size", ""):
-                _proposed += f' on a ticket of {record.get("bid_size")}'
+            _fm = fmt_input(record.get("fee_man", ""))
+            _fc = fmt_input(record.get("fee_carry", ""))
+            _fo = fmt_input(record.get("fee_onetime", ""))
+            _oo = _om = _oc = ""
+            try:
+                _jwt2 = get_jwt()
+                _dcf = call_pipeline_api("GET", f"/deals/{deal_id}.json", jwt=_jwt2).get("data", {}).get("custom_fields", {}) or {}
+                _oo = fmt_input(parse_cf(_dcf, SELLER_FEE_FIELD))
+                _om = fmt_input(parse_cf(_dcf, MGMT_FEE_FIELD))
+                _oc = fmt_input(parse_cf(_dcf, CARRY_FIELD))
+            except Exception as _e:
+                logger.error(f"QA fees: original terms fetch failed for {deal_id}: {_e}")
+            _pc = lambda v: f"{v}%" if str(v).strip() != "" else "&mdash;"
+            _ticket = str(record.get("bid_size", "") or "").strip()
+            if _ticket:
+                try:
+                    _ticket = f"${float(_ticket.replace(',', '').replace('$', '')):,.0f}"
+                except Exception:
+                    pass
+            _prop_lbl = "Proposed terms" + (f" ({_ticket} ticket)" if _ticket else "")
+            _orig_str = ", ".join(_b for _b in [
+                (f"one-time fee {_oo}%" if _oo != "" else ""),
+                (f"management fee {_om}%" if _om != "" else ""),
+                (f"carry {_oc}%" if _oc != "" else "")] if _b)
             rows += (
-                f'<div class="offer">{_proposed}</div>'
-                f'<label class="opt"><input type="radio" name="a_{qid}" value="Accept"> Accept</label>'
-                f'<label class="opt"><input type="radio" name="a_{qid}" value="Decline"> Decline &amp; Counter:</label>'
-                f'<div class="feegrid">'
-                f'<label class="feelbl">One-time fee (%)'
-                f'<input type="number" step="any" name="f_once_{qid}"></label>'
-                f'<label class="feelbl">Management fee (%)'
-                f'<input type="number" step="any" name="f_man_{qid}"></label>'
-                f'<label class="feelbl">Carry (%)'
-                f'<input type="number" step="any" name="f_carry_{qid}"></label>'
-                f'</div>'
+                f'<table class="feetbl">'
+                f'<tr><th></th><th>One-time fee</th><th>Mgmt fee</th><th>Carry</th></tr>'
+                f'<tr><td class="rowlbl">Original terms</td><td>{_pc(_oo)}</td><td>{_pc(_om)}</td><td>{_pc(_oc)}</td></tr>'
+                f'<tr><td class="rowlbl">{_prop_lbl}</td><td>{_pc(_fo)}</td><td>{_pc(_fm)}</td><td>{_pc(_fc)}</td></tr>'
+                f'<tr><td class="rowlbl">Countered terms</td>'
+                f'<td><input type="number" step="any" class="cinput" name="f_once_{qid}"></td>'
+                f'<td><input type="number" step="any" class="cinput" name="f_man_{qid}"></td>'
+                f'<td><input type="number" step="any" class="cinput" name="f_carry_{qid}"></td></tr>'
+                f'</table>'
+                f'<label class="opt-block"><input type="radio" name="a_{qid}" value="Accept"> Accept proposed terms</label>'
+                f'<label class="opt-block"><input type="radio" name="a_{qid}" value="Non-negotiable"> Terms non-negotiable (original terms stand)</label>'
+                f'<label class="opt-block"><input type="radio" name="a_{qid}" value="Counter"> Counter with the terms entered above</label>'
+                f'<label class="minbox">Countered terms apply for investment minimum of: $ '
+                f'<input type="text" class="cinput" name="f_min_{qid}" placeholder="e.g. 500,000"></label>'
+                f'<input type="hidden" name="orig_{qid}" value="{_orig_str}">'
             )
         elif atype == "date":
             rows += f'<input type="date" name="a_{qid}">'
@@ -2353,6 +2381,14 @@ def handle_qa_answer_page(qs: dict) -> dict:
         ".offer { font-size:14px; font-weight:400; color:#1f2937;"
         " background:#f1f4f7; border-left:3px solid #3d5a73;"
         " padding:8px 12px; border-radius:0 6px 6px 0; margin:6px 0 10px 0; }"
+        ".feetbl { border-collapse:collapse; margin:6px 0 12px 0; font-size:13px; width:100%; max-width:520px; }"
+        ".feetbl th, .feetbl td { padding:6px 10px; border:1px solid #e5e7eb; text-align:center; }"
+        ".feetbl th { background:#f8fafc; color:#555; font-weight:600; }"
+        ".feetbl td.rowlbl { text-align:left; font-weight:600; color:#1f2937; white-space:nowrap; }"
+        ".feetbl input { width:70px; margin-top:0; }"
+        ".opt-block { display:block; margin:6px 0; font-weight:400; }"
+        ".minbox { display:block; margin-top:8px; margin-left:24px; font-size:13px; color:#555; font-weight:400; }"
+        ".minbox input { width:140px; }"
         ".feegrid { display:flex; gap:10px; margin-top:8px; flex-wrap:wrap; }"
         ".feelbl { display:flex; flex-direction:column; font-size:13px; color:#555;"
         " font-weight:400; }"
@@ -2375,10 +2411,15 @@ def handle_qa_answer_page(qs: dict) -> dict:
         "document.addEventListener('change',function(e){var t=e.target;"
         "if(t.type!=='radio'||t.name.indexOf('a_')!==0)return;"
         "var f=t.closest('.field');if(!f)return;"
-        "var g=f.querySelector('.feegrid');if(!g)return;"
-        "var lock=(t.value==='Accept');"
-        "g.querySelectorAll('input').forEach(function(i){i.disabled=lock;if(lock)i.value='';});"
-        "f.querySelectorAll('.feelbl').forEach(function(l){l.style.opacity=lock?'0.45':'1';});"
+        "var ins=f.querySelectorAll('.cinput');if(!ins.length)return;"
+        "var lock=(t.value!=='Counter');"
+        "ins.forEach(function(i){i.disabled=lock;if(lock)i.value='';});"
+        "});"
+        "document.addEventListener('input',function(e){var t=e.target;"
+        "if(!t.classList||!t.classList.contains('cinput'))return;"
+        "var f=t.closest('.field');if(!f)return;"
+        "var r=f.querySelector('input[type=radio][value=Counter]');"
+        "if(r&&!r.checked){r.checked=true;}"
         "});</script>"
     )
 
