@@ -608,9 +608,26 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
                     if is_sell(d.get("custom_fields", {})) == sell:
                         continue
                     _cp_count += 1
-            if _cp_count > 0:
-                _cp_label = "Active buyers here" if sell else "Active sellers here"
-                rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #eee"><span style="color:#888">{_cp_label}</span><span style="font-weight:500">{_cp_count}</span></div>')
+            if sell:
+                # Sell orders: show buy-interest breadth (interest_people.json)
+                # instead of the live buy-order count.
+                _co_name = ((deal.get("company") or {}).get("name") or "").strip()
+                _trk = None
+                if _co_name:
+                    try:
+                        _t_obj = boto3.client("s3").get_object(Bucket="full-pipeline-cache", Key="interest_people.json")
+                        _t_buy = (json.loads(_t_obj["Body"].read().decode("utf-8")).get("buy") or {})
+                        _t_target = _co_name.lower()
+                        for _tn, _tv in _t_buy.items():
+                            if _tn.strip().lower() == _t_target and isinstance(_tv, list):
+                                _trk = len(_tv)
+                                break
+                    except Exception:
+                        _trk = None
+                if _trk:
+                    rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #eee"><span style="color:#888">My buyers seeking {_co_name}</span><span style="font-weight:500">{_trk}</span></div>')
+            elif _cp_count > 0:
+                rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #eee"><span style="color:#888">Active sellers here</span><span style="font-weight:500">{_cp_count}</span></div>')
             elif not sell:
                 _h_name = ((deal.get("company") or {}).get("name") or "").strip()
                 _h_count = None
