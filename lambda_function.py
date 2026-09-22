@@ -2153,6 +2153,11 @@ def handle_qa_answer_submit(params: dict) -> dict:
                 counter = ", ".join(_p)
                 if counter and _min:
                     counter += f"; applies for investment minimum of ${_min.lstrip('$')}"
+        # An "offer" (bid) counter: append the minimum size the counter price applies to.
+        if QA_ANSWER.get(qid, {}).get("type") == "offer" and counter:
+            _bmin = (params.get(f"m_{qid}", "") or "").strip()
+            if _bmin:
+                counter += f"; minimum size for counter terms ${_bmin.lstrip('$')}"
         answers[qid] = {"answer": a, "counter": counter, "note": note}
         pub = []
         if a: pub.append(a)
@@ -2336,11 +2341,32 @@ def handle_qa_answer_page(qs: dict) -> dict:
                     offer_txt += f" for {bid_size}"
             else:
                 offer_txt = "Counterparty's offer"
+            # Original deal price (Direct and Fund structures only) so the answerer can compare.
+            _orig_line = ""
+            try:
+                _jwt3 = get_jwt()
+                _ocf = call_pipeline_api("GET", f"/deals/{deal_id}.json", jwt=_jwt3).get("data", {}).get("custom_fields", {}) or {}
+                _sraw = _ocf.get(STRUCTURE_FIELD)
+                _slist = _sraw if isinstance(_sraw, list) else ([_sraw] if _sraw not in (None, "") else [])
+                _sids = {int(float(str(x))) for x in _slist if str(x).strip() != ""}
+                if _sids & {DIRECT_STRUCTURE_ID, 5077906}:
+                    _og = parse_cf(_ocf, GROSS_FIELD)
+                    try:
+                        _ogf = float(str(_og).replace(",", "")) if _og not in (None, "") else 0.0
+                    except Exception:
+                        _ogf = 0.0
+                    _orig_line = f"Original price: ${fmt(_ogf)}/share" if _ogf > 0 else "Original price: No price"
+            except Exception as _e:
+                logger.error(f"QA offer: original price fetch failed for {deal_id}: {_e}")
+            if _orig_line:
+                offer_txt += f'<br><span style="color:#6b7280;font-size:13px;">{_orig_line}</span>'
             rows += (
                 f'<div class="offer">{offer_txt}</div>'
                 f'<label class="opt"><input type="radio" name="a_{qid}" value="Accept"> Accept</label>'
                 f'<label class="opt"><input type="radio" name="a_{qid}" value="Decline"> Decline</label>'
                 f'<input type="text" name="c_{qid}" placeholder="Or counter at $___/share">'
+                f'<label class="minbox">Minimum size for counter terms: $ '
+                f'<input type="text" name="m_{qid}" placeholder="e.g. 500,000"></label>'
             )
         elif atype == "fees":
             _fm = fmt_input(record.get("fee_man", ""))
