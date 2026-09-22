@@ -2359,7 +2359,7 @@ def handle_qa_answer_page(qs: dict) -> dict:
         ".feelbl input { width:110px; }"
         ".btn-submit { margin-top:8px; padding:12px 20px; border:none; border-radius:8px;"
         " background:#1a1a1a; color:#fff; font-size:15px; cursor:pointer; }"
-        ".actrow { margin-top:14px; display:flex; gap:10px; flex-wrap:wrap; }"
+        ".actrow { margin:4px 0 22px 0; display:flex; gap:10px; flex-wrap:wrap; }"
         ".btn-act { padding:9px 14px; border:1px solid #d1d5db; border-radius:8px;"
         " background:#fff; color:#374151; font-size:13px; cursor:pointer; }"
         ".btn-cancel { border-color:#fca5a5; color:#b91c1c; }"
@@ -2391,14 +2391,14 @@ def handle_qa_answer_page(qs: dict) -> dict:
         f'<input type="hidden" name="deal_id" value="{deal_id}">'
         f'<input type="hidden" name="set" value="{set_id}">'
         f'<input type="hidden" name="token" value="{token}">'
-        f'{rows}'
-        f'<div class="field"><label>Notes (sent privately to Gracia Group)</label>'
-        f'<textarea name="o_general" rows="3" placeholder="Anything you want Gracia Group to know — or forward to the {asker_role}"></textarea></div>'
-        f'<button type="submit" class="btn-submit">Send answers</button>'
         f'<div class="actrow">'
         f'<button type="submit" name="deal_action" value="hold" class="btn-act" onclick="return confirm(\'Mark this deal as on hold? The {asker_role} will be notified and no answers will be sent.\')">This deal is on hold</button>'
         f'<button type="submit" name="deal_action" value="cancel" class="btn-act btn-cancel" onclick="return confirm(\'Cancel this deal? The {asker_role} will be notified and no answers will be sent.\')">Cancel this deal</button>'
         f'</div>'
+        f'{rows}'
+        f'<div class="field"><label>Notes (sent privately to Gracia Group)</label>'
+        f'<textarea name="o_general" rows="3" placeholder="Anything you want Gracia Group to know — or forward to the {asker_role}"></textarea></div>'
+        f'<button type="submit" class="btn-submit">Send answers</button>'
         f'<button type="submit" name="optout" value="1" class="btn-optout" onclick="return confirm(\'Stop receiving question requests for this deal?\')">Do not send me counterparty questions</button>'
         f'</form>'
     ) + style
