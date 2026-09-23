@@ -218,6 +218,19 @@ def parse_cf(cf, field):
     return v
 
 
+def commission_rate_for_size(size) -> float:
+    """Rainmaker commission tier by deal size ($). The only tier table in this file."""
+    if not size:
+        return 0.05
+    if size < 1_000_000:
+        return 0.05
+    if size < 5_000_000:
+        return 0.04
+    if size < 10_000_000:
+        return 0.03
+    return 0.025
+
+
 def is_sell(cf) -> bool:
     type_ids = cf.get(DEAL_TYPE_FIELD, [])
     if isinstance(type_ids, list):
@@ -598,6 +611,26 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         price_field   = "gross"
         price_current = gross_val
 
+    # Sell-side: market prices are gross; the seller enters net. Tier basis is
+    # the stored max size, else stored shares × stored net (same as submit).
+    def _num(v):
+        if v in (None, ""):
+            return None
+        try:
+            return float(str(v).replace(",", "."))
+        except (ValueError, TypeError):
+            return None
+    sell_rate = 0.0
+    if sell:
+        _basis = _num(parse_cf(cf, MAX_SIZE_FIELD))
+        if not _basis:
+            _s_sh, _s_net = _num(parse_cf(cf, SHARE_COUNT_FIELD)), _num(parse_cf(cf, NET_FIELD))
+            _basis = _s_sh * _s_net if (_s_sh and _s_net) else None
+        sell_rate = commission_rate_for_size(_basis)
+
+    def _to_net(p):
+        return round(p / (1 + sell_rate), 2)
+
     # Build valuation context if we have company data
     val_html = ""
     if company_rec:
@@ -608,7 +641,10 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         rows = []
         if lr_pps:
             try:
-                rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #eee"><span style="color:#888">Last round price</span><span style="font-weight:500">${float(lr_pps):,.2f}/share</span></div>')
+                _lr_lbl = f'${float(lr_pps):,.2f}/share (gross)' if sell else f'${float(lr_pps):,.2f}/share'
+                rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #eee"><span style="color:#888">Last round price</span><span style="font-weight:500">{_lr_lbl}</span></div>')
+                if deal_price and sell:
+                    deal_price = deal_price * (1 + sell_rate)
                 if deal_price:
                     disc = ((float(lr_pps) - deal_price) / float(lr_pps)) * 100
                     sign = "discount" if disc > 0 else "premium"
@@ -618,7 +654,10 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         if hiive_price:
             try:
                 hiive_ref_f = round(float(str(hiive_price).replace(",", ".")))
-                rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0"><span style="color:#888">Approximate market price</span><span style="font-weight:500">${hiive_ref_f:,}/share</span></div>')
+                if sell:
+                    rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0"><span style="color:#888">Market price</span><span style="font-weight:500">${hiive_ref_f:,}/share (gross — buyer&rsquo;s all-in price incl. commission) &asymp; ${_to_net(hiive_ref_f):,.2f}/share net to you</span></div>')
+                else:
+                    rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0"><span style="color:#888">Approximate market price</span><span style="font-weight:500">${hiive_ref_f:,}/share</span></div>')
             except (ValueError, TypeError):
                 pass
         # Counterparty presence. Firm-stage opposite-side deals, same company,
@@ -818,8 +857,16 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         return p * (1 - pct / 100.0) if sell else p * (1 + pct / 100.0)
 
     def _worse_than(my, opp):
-        # sell: my net > their ask is worse; buy: my gross < their bid is worse
-        return (my > opp) if sell else (my < opp)
+        # sell: my implied gross (net × (1 + rate)) > their bid is worse; buy: my gross < their ask is worse
+        return (my * (1 + sell_rate) > opp) if sell else (my < opp)
+
+    def _fill(gross_p, label, color):
+        # Popup button. Sell forms fill the NET equivalent of a gross market-based price.
+        if sell:
+            return {"price": _to_net(gross_p),
+                    "display": f"&asymp; ${_to_net(gross_p):,.2f}/share net to you",
+                    "label": f"{label} (${gross_p:,.2f} gross)", "color": color}
+        return {"price": round(gross_p, 2), "label": label, "color": color}
 
     popup_variant = None
     popup_buttons = []
@@ -832,32 +879,32 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
             popup_variant = 3
             popup_heading = "Without a price, we can't find a match!"
             popup_keep = "Submit without price"
-            popup_top = f"Others are {anchor_verb} at ${hiive_anchor:,.2f}"
+            popup_top = f"Others are {anchor_verb} at ${hiive_anchor:,.2f}" + (" (gross — buyer&rsquo;s all-in price incl. commission)" if sell else "")
             popup_buttons = [
-                {"price": round(hiive_anchor * 0.90, 2), "label": "10% below", "color": "blue"},
-                {"price": round(hiive_anchor,        2), "label": "Match",     "color": "dark"},
-                {"price": round(hiive_anchor * 1.10, 2), "label": "10% above", "color": "blue"},
+                _fill(hiive_anchor * 0.90, "10% below", "blue"),
+                _fill(hiive_anchor,        "Match",     "dark"),
+                _fill(hiive_anchor * 1.10, "10% above", "blue"),
             ]
         elif lr_pps_val is not None:
             popup_variant = 3
             popup_heading = "Without a price, we can't find a match!"
             popup_keep = "Submit without price"
             popup_buttons = [
-                {"price": round(_better(lr_pps_val, 20), 2), "label": "20% better than last round", "color": "light"},
-                {"price": round(_better(lr_pps_val, 10), 2), "label": "10% better than last round", "color": "dark"},
-                {"price": round(lr_pps_val, 2),              "label": "Last round price",           "color": "blue"},
+                _fill(_better(lr_pps_val, 20), "20% better than last round", "light"),
+                _fill(_better(lr_pps_val, 10), "10% better than last round", "dark"),
+                _fill(lr_pps_val,              "Last round price",           "blue"),
             ]
         else:
             popup_variant = None
     elif hiive_anchor is not None and _worse_than(existing_price, hiive_anchor):
         popup_variant = 1
-        popup_top = f"Others are {anchor_verb} at ${hiive_anchor:,.2f}"
+        popup_top = f"Others are {anchor_verb} at ${hiive_anchor:,.2f}" + (" (gross — buyer&rsquo;s all-in price incl. commission)" if sell else "")
         popup_heading = "Improve your chances of finding a match:"
-        popup_keep = f"Keep ${existing_price:,.2f}"
+        popup_keep = f"Keep ${existing_price:,.2f}" + (" net" if sell else "")
         popup_buttons = [
-            {"price": round(hiive_anchor * 0.90, 2), "label": "10% below", "color": "blue"},
-            {"price": round(hiive_anchor,        2), "label": "Match",     "color": "dark"},
-            {"price": round(hiive_anchor * 1.10, 2), "label": "10% above", "color": "blue"},
+            _fill(hiive_anchor * 0.90, "10% below", "blue"),
+            _fill(hiive_anchor,        "Match",     "dark"),
+            _fill(hiive_anchor * 1.10, "10% above", "blue"),
         ]
     else:
         popup_variant = 2
@@ -874,7 +921,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
     if popup_variant:
         btns_html = "".join(
             f'<button type="button" class="modal-btn modal-btn-{b["color"]}" data-price="{b["price"]:.2f}">'
-            f'<div class="modal-btn-price">${b["price"]:,.2f}</div>'
+            f'<div class="modal-btn-price">{b.get("display") or "${:,.2f}".format(b["price"])}</div>'
             f'<div class="modal-btn-sub">{b["label"]}</div>'
             f'</button>'
             for b in popup_buttons
@@ -888,11 +935,18 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         lr_link_html = ""
         if show_lr_link:
             lr_verb = "list" if sell else "bid"
+            if sell:
+                lr_fill = _to_net(lr_pps_val)
+                lr_text = (f'Or {lr_verb} at last round price: ${lr_pps_val:,.2f} (gross) '
+                           f'&asymp; ${lr_fill:,.2f}/share net to you')
+            else:
+                lr_fill = lr_pps_val
+                lr_text = f'Or {lr_verb} at last round price: ${lr_pps_val:,.2f}'
             lr_link_html = (
                 f'<div class="modal-link-lr-row">'
                 f'<button type="button" class="modal-link modal-link-lr" id="modalLrBtn" '
-                f'data-price="{lr_pps_val:.2f}">'
-                f'Or {lr_verb} at last round price: ${lr_pps_val:,.2f}'
+                f'data-price="{lr_fill:.2f}">'
+                f'{lr_text}'
                 f'</button></div>'
             )
 
@@ -980,11 +1034,20 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         try:
             hiive_mkt = round(float(str(hiive_price).replace(",", ".")))
             show_match = False
-            if sell and (existing_price is None or hiive_mkt < existing_price):
+            if sell and (existing_price is None or hiive_mkt < existing_price * (1 + sell_rate)):
                 show_match = True
             elif not sell and (existing_price is None or hiive_mkt > existing_price):
                 show_match = True
-            if show_match:
+            if show_match and sell:
+                hiive_net = _to_net(float(str(hiive_price).replace(",", ".")))
+                hiive_btn_html = f"""
+        <button type="button"
+          onclick="document.querySelector('[name={price_field}]').value='{hiive_net:.2f}'"
+          style="width:100%;margin-bottom:10px;background:#e8f4e8;color:#2a6a2a;border:1px solid #a8d4a8;
+                 border-radius:8px;padding:11px;font-size:14px;font-weight:600;cursor:pointer;">
+          ⚡ Match Market Price: ${hiive_mkt:,}/share (gross — buyer&rsquo;s all-in price incl. commission) &asymp; ${hiive_net:,.2f}/share net to you
+        </button>"""
+            elif show_match:
                 hiive_btn_html = f"""
         <button type="button"
           onclick="document.querySelector('[name={price_field}]').value='{hiive_mkt}'"
@@ -1018,6 +1081,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
       <div class="field">
         <label>{price_label}</label>
         <input type="number" name="{price_field}" value="{price_current}" step="any" placeholder="e.g. 45.50">
+        {'<p style="font-size:12px;color:#888;margin:4px 0 0 0;">Market prices shown on this page are gross (what buyers pay). Your net is the gross minus Rainmaker&rsquo;s commission: 5% under $1M, 4% $1&ndash;5M, 3% $5&ndash;10M, 2.5% over $10M.</p>' if sell else ''}
       </div>
 
       {hiive_btn_html}
@@ -1468,14 +1532,29 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     comments     = params.get("comments", "").strip()
 
     sell       = is_sell(current_cf)
+
+    # Side lock: sellers only ever set net, buyers only ever set gross.
+    if sell and gross_val:
+        logger.warning(f"Deal {deal_id}: ignoring posted gross={gross_val!r} on a sell deal")
+        gross_val = ""
+    if not sell and net_val:
+        logger.warning(f"Deal {deal_id}: ignoring posted net={net_val!r} on a buy deal")
+        net_val = ""
+
     eff_net    = _f(net_val)   or _f(parse_cf(current_cf, NET_FIELD))
     eff_gross  = _f(gross_val) or _f(parse_cf(current_cf, GROSS_FIELD))
     eff_shares = _f(share_val) or _f(parse_cf(current_cf, SHARE_COUNT_FIELD))
     structure  = parse_cf(current_cf, STRUCTURE_FIELD)
 
-    # Sell-side: gross is an estimate from net × 1.05, regardless of what's stored.
+    # Sell-side: gross is always derived from net by commission tier, for every
+    # structure. Tier basis: submitted max, else stored max, else shares × net.
+    commission_rate = None
     if sell and eff_net:
-        eff_gross = round(eff_net * 1.05, 4)
+        tier_basis = _f(max_val) or _f(parse_cf(current_cf, MAX_SIZE_FIELD))
+        if not tier_basis and eff_shares:
+            tier_basis = eff_shares * eff_net
+        commission_rate = commission_rate_for_size(tier_basis)
+        eff_gross = round(eff_net * (1 + commission_rate), 4)
 
     has_shares    = bool(eff_shares)
     has_price     = bool(eff_net) or bool(eff_gross)
@@ -1491,6 +1570,8 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     if gross_val:
         try: custom[GROSS_FIELD] = float(gross_val)
         except ValueError: pass
+    if commission_rate is not None:
+        custom[GROSS_FIELD] = eff_gross
     if share_val:
         try: custom[SHARE_COUNT_FIELD] = float(share_val)
         except ValueError: pass
@@ -1528,29 +1609,6 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         try: custom[SELLER_FEE_FIELD] = float(seller_fee_val)
         except ValueError: pass
 
-    # Sell-side: write gross ONLY for direct trades whose min and max size fall
-    # in the SAME commission tier. The tier sets the commission rate.
-    #   < $1M        -> 5%
-    #   $1M to <$5M  -> 4%
-    #   >= $5M       -> 3%
-    def _commission_tier(size):
-        if size is None:
-            return None
-        if size < 1_000_000:
-            return 0.05
-        if size < 5_000_000:
-            return 0.04
-        return 0.03
-
-    # Direct-structure detection (mirror the is_direct logic used elsewhere in the file)
-    submit_is_direct = False
-    if structure is not None:
-        try:
-            submit_is_direct = int(float(str(structure))) == DIRECT_STRUCTURE_ID
-        except (ValueError, TypeError):
-            if isinstance(structure, list):
-                submit_is_direct = DIRECT_STRUCTURE_ID in [int(x) for x in structure if x]
-
     # SPV detection for email (mirrors render_form logic)
     submit_is_spv = False
     if structure is not None:
@@ -1559,24 +1617,6 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         except (ValueError, TypeError):
             if isinstance(structure, list):
                 submit_is_spv = 5077906 in [int(x) for x in structure if x]
-
-    # Seller's stated min and max (submitted value if posted, else stored deal value).
-    # Use stated sizes, NOT any derived max, to avoid circularity with gross.
-    eff_min = _f(min_val) or _f(parse_cf(current_cf, MIN_SIZE_FIELD))
-    eff_max = _f(parse_cf(current_cf, MAX_SIZE_FIELD))
-    submitted_max = _f(params.get("max_size", "").strip().replace(",", ""))
-    if submitted_max is not None:
-        eff_max = submitted_max
-
-    commission_rate = None
-    if sell and eff_net and submit_is_direct:
-        t_min = _commission_tier(eff_min)
-        t_max = _commission_tier(eff_max)
-        if t_min is not None and t_min == t_max:
-            commission_rate = t_min
-
-    if commission_rate is not None:
-        custom[GROSS_FIELD] = round(eff_net * (1 + commission_rate), 4)
 
     # Max size: use the entered value if provided, otherwise derive shares x gross.
     if max_val:
@@ -1747,7 +1787,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     if hiive_px_raw not in (None, ""):
         try:
             hiive_px_f = float(str(hiive_px_raw).replace(",", "."))
-            compare_price = float(str(net_after).replace("$", "").replace(",", "")) if net_after not in ("—", None, "") else None
+            compare_price = float(str(gross_after).replace("$", "").replace(",", "")) if gross_after not in ("—", None, "") else None
             if compare_price and hiive_px_f:
                 pct = ((compare_price - hiive_px_f) / hiive_px_f) * 100
                 if pct >= 0:
@@ -1811,7 +1851,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         *table_lines,
     ]
     if commission_rate is not None and eff_net:
-        email_lines.append(f"(Direct trade — gross = net × {1 + commission_rate:.2f} = ${eff_net * (1 + commission_rate):,.2f}/share)")
+        email_lines.append(f"(gross = net × {1 + commission_rate:g} ({commission_rate * 100:g}% tier) = ${eff_gross:,.2f}/share)")
     if comments:
         email_lines += ["", f"Client note (may need a public-notes update): {comments}"]
     email_lines += ["", "Refresh reset to 60 days."]
