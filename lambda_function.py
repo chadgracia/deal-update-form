@@ -1053,11 +1053,12 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
 
 # ── Success page ──────────────────────────────────────────────────────────────
 
-def success_page(message: str) -> dict:
+def success_page(message: str, subtitle: str = None) -> dict:
+    subtitle = subtitle or "Your update has been received. We'll be in touch if we need anything else."
     html = f"""
     <div class="success-icon">✓</div>
     <h1 style="text-align:center">{message}</h1>
-    <p class="subtitle" style="text-align:center;margin-top:8px">Your update has been received. We'll be in touch if we need anything else.</p>
+    <p class="subtitle" style="text-align:center;margin-top:8px">{subtitle}</p>
     <div class="countdown" id="cd">Redirecting to the marketplace in <span id="n">3</span> seconds…</div>
     <script>
       var n = 3;
@@ -1367,21 +1368,42 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         return success_page("Deal put on hold")
 
     if submit_action == "cancel":
+        # Cancel really cancels: PUT the stage to Obsolete first; only on
+        # success email Chad. Requires the signed link token (it rides in
+        # the form's own query string) since this write is destructive.
+        if not verify_token(deal_id, params.get("token", "")):
+            return error_page("Invalid or expired link.")
         deal_url = f"https://app.pipelinecrm.com/deals/{deal_id}"
-        send_email(
-            CHAD_EMAIL,
-            f"Deal cancellation via update form: deal {deal_id}",
-            f"The client clicked CANCEL — deal {deal_id} should remain Obsolete.\n"
-            f"Pipeline: {deal_url}",
-            html=email_html(
-                f'<p style="margin:0 0 12px 0;">The client clicked '
-                f'<strong>CANCEL</strong> — deal {deal_id} should remain '
-                f'<strong>Obsolete</strong>.</p>'
-                f'<p style="margin:0;font-size:13px;">'
-                f'<a href="{deal_url}" style="{EMAIL_LINK_STYLE}">Open deal {deal_id}</a></p>'
+        result = call_pipeline_api("PUT", f"/deals/{deal_id}.json",
+                                   {"deal": {"deal_stage_id": OBSOLETE_STAGE_ID}}, jwt=jwt)
+        if result["status"] != 200:
+            logger.error(f"Cancel PUT failed for deal {deal_id}: {result['status']} {str(result['data'])[:300]}")
+            return error_page(f"Could not cancel the deal (Pipeline error {result['status']}). "
+                              "Nothing was changed. Please try again or contact us.")
+        data = result["data"] if isinstance(result["data"], dict) else {}
+        deal_name = ((data.get("deal") if isinstance(data.get("deal"), dict) else data).get("name") or "").strip()
+        if not deal_name:
+            got = call_pipeline_api("GET", f"/deals/{deal_id}.json", jwt=jwt)
+            if got["status"] == 200 and isinstance(got["data"], dict):
+                deal_name = (got["data"].get("name") or "").strip()
+        deal_label = f"{deal_name} (#{deal_id})" if deal_name else f"#{deal_id}"
+        try:
+            send_email(
+                CHAD_EMAIL,
+                f"Deal cancelled via update form: {deal_label}",
+                f"Deal {deal_label} was cancelled via the update form and set to Obsolete.\n"
+                f"Pipeline: {deal_url}",
+                html=email_html(
+                    f'<p style="margin:0 0 12px 0;">Deal <strong>{html.escape(deal_label)}</strong> was '
+                    f'cancelled via the update form and set to <strong>Obsolete</strong>.</p>'
+                    f'<p style="margin:0;font-size:13px;">'
+                    f'<a href="{deal_url}" style="{EMAIL_LINK_STYLE}">Open deal {deal_id}</a></p>'
+                )
             )
-        )
-        return success_page("Deal removed")
+        except Exception as e:
+            logger.error(f"Cancel email failed for deal {deal_id} (stage already set to Obsolete): {e}")
+        return success_page("Deal removed.",
+                            subtitle="It&rsquo;s now archived; use Reopen on your dashboard to bring it back.")
 
     # Fetch current deal for old vs new comparison
     current_result = call_pipeline_api("GET", f"/deals/{deal_id}.json", jwt=jwt)
