@@ -29,6 +29,11 @@ logger.setLevel(logging.INFO)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 HMAC_SECRET         = os.environ.get("HMAC_SECRET", "change-me-in-env")
+# Dedicated key for DEAL-link tokens (?deal_id=X&token=Y): every update-form
+# link generator (syndicate-dash, portfolio-deploy, deal-nudge, stale deal
+# scanner) signs with it. HMAC_SECRET stays for unsubscribe, "new order"
+# and Q&A answer links. Read from env only -- never committed.
+FORM_HMAC_SECRET    = os.environ.get("FORM_HMAC_SECRET", "")
 SES_SENDER          = "agent@agent.graciagroup.com"
 AGENT_EMAIL         = "agent@agent.graciagroup.com"
 CHAD_EMAIL          = "cgracia@rainmakersecurities.com"
@@ -129,6 +134,29 @@ def make_token(id_value: int) -> str:
     msg = str(id_value).encode()
     sig = hmac.new(HMAC_SECRET.encode(), msg, hashlib.sha256).digest()
     return base64.urlsafe_b64encode(sig).decode().rstrip("=")
+
+
+def _sign(secret: str, id_value) -> str:
+    sig = hmac.new(secret.encode(), str(id_value).encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(sig).decode().rstrip("=")
+
+
+def make_deal_token(deal_id) -> str:
+    """Deal-link token: signed with FORM_HMAC_SECRET (falls back to
+    HMAC_SECRET only if FORM_HMAC_SECRET is not configured)."""
+    return _sign(FORM_HMAC_SECRET or HMAC_SECRET, deal_id)
+
+
+def verify_deal_token(deal_id, token: str) -> bool:
+    """Key-rotation release 1: accepts a deal token signed with EITHER the
+    new FORM_HMAC_SECRET or the previous HMAC_SECRET, for every action, so
+    no link breaks while the generators switch keys. (Release 2 will limit
+    the previous key to viewing/editing for a 14-day grace window and never
+    for Hold or Cancel.)"""
+    token = token or ""
+    if FORM_HMAC_SECRET and hmac.compare_digest(_sign(FORM_HMAC_SECRET, deal_id), token):
+        return True
+    return hmac.compare_digest(_sign(HMAC_SECRET, deal_id), token)
 
 
 def verify_token(id_value: int, token: str) -> bool:
@@ -1183,7 +1211,7 @@ def handle_get(params: dict) -> dict:
         deal_id = int(deal_id_str)
     except (ValueError, TypeError):
         return error_page("Invalid deal link.")
-    if not verify_token(deal_id, token):
+    if not verify_deal_token(deal_id, token):
         return error_page("Invalid or expired link.")
 
     jwt    = get_jwt()
@@ -1332,7 +1360,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
 
         return {
             "statusCode": 302,
-            "headers": {"Location": f"?deal_id={new_deal_id}&token={make_token(new_deal_id)}"},
+            "headers": {"Location": f"?deal_id={new_deal_id}&token={make_deal_token(new_deal_id)}"},
             "body": "",
         }
 
@@ -1371,7 +1399,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         # Cancel really cancels: PUT the stage to Obsolete first; only on
         # success email Chad. Requires the signed link token (it rides in
         # the form's own query string) since this write is destructive.
-        if not verify_token(deal_id, params.get("token", "")):
+        if not verify_deal_token(deal_id, params.get("token", "")):
             return error_page("Invalid or expired link.")
         deal_url = f"https://app.pipelinecrm.com/deals/{deal_id}"
         result = call_pipeline_api("PUT", f"/deals/{deal_id}.json",
