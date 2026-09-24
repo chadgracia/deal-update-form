@@ -1032,6 +1032,9 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         if (bypass) return;
         var s = e.submitter;
         if (s && (s.value === 'cancel' || s.value === 'hold')) return;
+        // SPV sell orders: a valuation stands in for a price, so no nudge.
+        var valInput = form.querySelector('[name="est_valuation"]');
+        if (valInput && valInput.value.trim()) return;
         var cur = priceInput ? priceInput.value : '';
         if (cur === initialPrice) {{
           e.preventDefault();
