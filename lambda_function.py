@@ -235,7 +235,7 @@ def commission_rate_for_size(size) -> float:
     if size < 5_000_000:
         return 0.04
     if size < 10_000_000:
-        return 0.03
+        return 0.035
     return 0.025
 
 
@@ -692,6 +692,16 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
     def _to_net(p):
         return round(p / (1 + sell_rate), 2)
 
+    # Market price: one displayed gross (whole dollars) and one net derived from it,
+    # used by the Company Reference row and the Match Market Price button alike.
+    mkt_gross = mkt_net = None
+    if hiive_price:
+        try:
+            mkt_gross = round(float(str(hiive_price).replace(",", ".")))
+            mkt_net = _to_net(mkt_gross)
+        except (ValueError, TypeError):
+            mkt_gross = mkt_net = None
+
     # Build valuation context if we have company data
     val_html = ""
     ref_bottom_html = ""
@@ -713,11 +723,11 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
                     rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #eee"><span style="color:#888">Your price vs last round</span><span style="font-weight:500">{abs(disc):.1f}% {sign}</span></div>')
             except (ValueError, TypeError):
                 pass
-        if hiive_price:
+        if mkt_gross is not None:
             try:
-                hiive_ref_f = round(float(str(hiive_price).replace(",", ".")))
+                hiive_ref_f = mkt_gross
                 if sell:
-                    rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0"><span style="color:#888">Market price</span><span style="font-weight:500">${hiive_ref_f:,}/share (gross — buyer&rsquo;s all-in price incl. commission) &asymp; ${_to_net(hiive_ref_f):,.2f}/share net to you</span></div>')
+                    rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0"><span style="color:#888">Market price</span><span style="font-weight:500">${hiive_ref_f:,}/share (gross — buyer&rsquo;s all-in price incl. commission) &asymp; ${mkt_net:,.2f}/share net to you</span></div>')
                     rows.append('<div style="font-size:12px;color:#888;padding:0 0 6px 0">Market prices shown on this page are gross (what buyers pay). Your net is the amount you want after our commission and any one-time fee.</div>')
                 else:
                     rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0"><span style="color:#888">Approximate market price</span><span style="font-weight:500">${hiive_ref_f:,}/share</span></div>')
@@ -1115,16 +1125,16 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
 
     # Build Hiive match button
     hiive_btn_html = ""
-    if hiive_price and not is_spv:
+    if mkt_gross is not None and not is_spv:
         try:
-            hiive_mkt = round(float(str(hiive_price).replace(",", ".")))
+            hiive_mkt = mkt_gross
             show_match = False
             if sell and (existing_price is None or hiive_mkt < existing_price * (1 + sell_rate)):
                 show_match = True
             elif not sell and (existing_price is None or hiive_mkt > existing_price):
                 show_match = True
             if show_match and sell:
-                hiive_net = _to_net(float(str(hiive_price).replace(",", ".")))
+                hiive_net = mkt_net
                 hiive_btn_html = f"""
         <button type="button"
           onclick="document.querySelector('[name={price_field}]').value='{hiive_net:.2f}'"
