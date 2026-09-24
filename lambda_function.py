@@ -99,7 +99,7 @@ FUND_EXEMPT_FIELD = "custom_label_4006089"
 SELLER_ROLE_FIELD = "custom_label_3938748"
 DEADLINE_FIELD    = "custom_label_4006402"
 SELLER_FEE_FIELD  = "custom_label_3940560"
-EST_VAL_FIELD     = "custom_label_4009563"
+EST_VAL_FIELD     = "custom_label_4009563"  # stored in billions, like COMPANY_VAL_FIELD
 SERIES_FIELD      = "custom_label_3064333"
 PREFERRED_CLASS_ID = 5077834
 SERIES_OPTS = [(5077840, "Seed"), (5077843, "A"), (5077846, "B"), (5077849, "C"),
@@ -258,6 +258,17 @@ def parse_valuation(raw):
         return None
     val = float(m.group(1)) * _VAL_SUFFIX[m.group(2)]
     return round(val, 2) if val >= 1_000_000 else None
+
+
+def est_val_dollars(stored):
+    """EST_VAL_FIELD value (billions) -> dollars, or None."""
+    if stored in (None, ""):
+        return None
+    try:
+        f = float(str(stored).replace(",", ""))
+    except (ValueError, TypeError):
+        return None
+    return f * 1e9 if f > 0 else None
 
 
 def fmt_valuation(val):
@@ -1145,7 +1156,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
     series_script = ""
     if need_price_or_val:
         share_count_html = ""  # SPV sells don't collect share count; stored value is left alone
-        _ev_stored = _num(str(parse_cf(cf, EST_VAL_FIELD) or "").replace(",", ""))
+        _ev_stored = est_val_dollars(parse_cf(cf, EST_VAL_FIELD))
         est_val_cur = f"${int(round(_ev_stored)):,}" if _ev_stored else ""
         est_val_html = f'''
       <div class="field">
@@ -1218,7 +1229,16 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
       // Plain digits get $ and commas as they type; shorthand (150M, 1.5B) is left as typed.
       function reformat() {{
         var raw = v.value;
-        if (/[a-z]/i.test(raw)) return;
+        if (/[a-z]/i.test(raw)) {{
+          // Shorthand: add $ and uppercase a short suffix (25b -> $25B); words are left as typed.
+          var sm = raw.match(/^([$]?)([0-9.,]*)([a-z]{{1,2}})$/i);
+          if (sm && /^(k|m|b|t|mm|mn|bn|tn)$/i.test(sm[3]) && (sm[3] !== sm[3].toUpperCase() || !sm[1])) {{
+            var at = v.selectionStart == null ? raw.length : v.selectionStart;
+            v.value = '$' + sm[2] + sm[3].toUpperCase();
+            if (document.activeElement === v) v.setSelectionRange(at + (sm[1] ? 0 : 1), at + (sm[1] ? 0 : 1));
+          }}
+          return;
+        }}
         var pos = v.selectionStart == null ? raw.length : v.selectionStart;
         var sig = raw.slice(0, pos).replace(/[^0-9.]/g, '').length;
         var clean = raw.replace(/[^0-9.]/g, '');
@@ -1792,7 +1812,14 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     has_shares    = bool(eff_shares)
     has_price     = bool(eff_net) or bool(eff_gross)
     has_structure = bool(structure)
-    new_stage      = FIRM_STAGE_ID if (has_shares and has_price and has_structure) else INQUIRY_STAGE_ID
+    if submit_is_spv and sell:
+        # SPV sells: price OR valuation, plus max size and structure; share count not required.
+        has_val  = est_val_num is not None or bool(est_val_dollars(parse_cf(current_cf, EST_VAL_FIELD)))
+        has_max  = bool(_f(max_val) or _f(parse_cf(current_cf, MAX_SIZE_FIELD)))
+        is_firm  = (has_price or has_val) and has_max and has_structure
+    else:
+        is_firm  = has_shares and has_price and has_structure
+    new_stage      = FIRM_STAGE_ID if is_firm else INQUIRY_STAGE_ID
     new_stage_name = "Firm" if new_stage == FIRM_STAGE_ID else "Inquiry"
 
     # Build Pipeline update payload
@@ -1842,7 +1869,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         try: custom[SELLER_FEE_FIELD] = float(seller_fee_val)
         except ValueError: pass
     if est_val_num is not None:
-        custom[EST_VAL_FIELD] = est_val_num
+        custom[EST_VAL_FIELD] = round(est_val_num / 1e9, 6)  # billions
     series_val = params.get("series", "").strip()
     if submit_is_spv and sell and share_class_val == str(PREFERRED_CLASS_ID) and series_val:
         try: custom[SERIES_FIELD] = int(series_val)
@@ -2038,7 +2065,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     ]
     if submit_is_spv:
         if sell:
-            _ev_old = fmt_valuation(parse_cf(current_cf, EST_VAL_FIELD)) or "—"
+            _ev_old = fmt_valuation(est_val_dollars(parse_cf(current_cf, EST_VAL_FIELD))) or "—"
             _ev_new = fmt_valuation(est_val_num) if est_val_num is not None else _ev_old
             rows.append(("Est. valuation", _ev_old, _ev_new))
             _SER_LABELS = dict(SERIES_OPTS)
