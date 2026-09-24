@@ -100,6 +100,12 @@ SELLER_ROLE_FIELD = "custom_label_3938748"
 DEADLINE_FIELD    = "custom_label_4006402"
 SELLER_FEE_FIELD  = "custom_label_3940560"
 EST_VAL_FIELD     = "custom_label_4009563"
+SERIES_FIELD      = "custom_label_3064333"
+PREFERRED_CLASS_ID = 5077834
+SERIES_OPTS = [(5077840, "Seed"), (5077843, "A"), (5077846, "B"), (5077849, "C"),
+               (5077852, "D"), (5077855, "E"), (5077858, "F"), (5077861, "G"),
+               (5077864, "H"), (5077867, "I"), (6539216, "N"), (5077918, "Mixed"),
+               (5077870, "Other (See Notes)"), (5077837, "N/A")]
 SHARE_COUNT_FIELD = "custom_label_3070843"
 SHARE_CLASS_FIELD = "custom_label_3064330"
 REFRESH_FIELD     = "custom_label_3994687"
@@ -242,15 +248,16 @@ _VAL_SUFFIX = {
 
 
 def parse_valuation(raw):
-    """Flexible valuation input ("5B", "$500M", "2.5bn", "750k", "5,000,000,000") -> dollars, or None."""
+    """Flexible valuation input ("5B", "$500M", "2.5bn", "$150,000,000") -> dollars, or None.
+    Anything under $1M is treated as unparseable (a company valuation, not a price)."""
     if raw in (None, ""):
         return None
     s = str(raw).strip().lower().replace("$", "").replace(",", "").replace(" ", "")
-    m = re.fullmatch(r"(\d+(?:\.\d+)?|\.\d+)([a-z]*)", s)
+    m = re.fullmatch(r"(\d+(?:\.\d*)?|\.\d+)([a-z]*)", s)
     if not m or m.group(2) not in _VAL_SUFFIX:
         return None
     val = float(m.group(1)) * _VAL_SUFFIX[m.group(2)]
-    return round(val, 2) if val > 0 else None
+    return round(val, 2) if val >= 1_000_000 else None
 
 
 def fmt_valuation(val):
@@ -529,6 +536,7 @@ def html_response(body_html: str, status: int = 200) -> dict:
 
 
 PRICE_OR_VAL_MSG = "Enter either a net price or an estimated valuation."
+EST_VAL_SMALL_MSG = "Enter the full company valuation, e.g. 150,000,000 or 150M"
 
 
 def error_page(msg: str) -> dict:
@@ -645,6 +653,8 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         price_tooltip = "Net = the amount you receive after our commission is deducted."
         price_field   = "net"
         price_current = net_val
+        if is_spv:
+            price_label = "Net Price (Before your fees and Rainmaker commission, if known)"
     else:
         price_label   = "Gross Price (all-in price including commission)"
         price_tooltip = "Gross = the total price you pay, including our commission."
@@ -673,6 +683,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
 
     # Build valuation context if we have company data
     val_html = ""
+    ref_bottom_html = ""
     if company_rec:
         ccf     = company_rec.get("custom_fields", {})
         lr_pps  = parse_cf(ccf, COMPANY_PPS_FIELD)
@@ -701,6 +712,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
                     rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0"><span style="color:#888">Approximate market price</span><span style="font-weight:500">${hiive_ref_f:,}/share</span></div>')
             except (ValueError, TypeError):
                 pass
+        ref_rows = list(rows)  # everything above the counterparty line
         # Counterparty presence. Firm-stage opposite-side deals, same company,
         # excluding this deal. Never show a zero; buyers fall back to holder count.
         try:
@@ -755,7 +767,25 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         except Exception as e:
             logger.warning(f"counterparty line failed: {e}")
 
-        if rows:
+        if is_spv and sell:
+            # SPV sells: buyer-interest line stays on top; the rest collapses at the bottom.
+            top_rows = rows[len(ref_rows):]
+            if top_rows:
+                val_html = f'''
+        <div class="market-box" style="background:#f9f9f9;border-color:#ddd;color:#444;margin-bottom:24px">
+          {"".join(top_rows)}
+        </div>'''
+            if ref_rows:
+                ref_bottom_html = f'''
+      <style>.ref-section summary::-webkit-details-marker {{ display:none; }}</style>
+      <details class="ref-section" style="margin-bottom:20px"
+        ontoggle="this.querySelector('.ref-arrow').textContent = this.open ? '\u25BE' : '\u25B8'">
+        <summary style="cursor:pointer;list-style:none;font-weight:600;color:#888;padding:6px 0"><span class="ref-arrow">&#9656;</span> Company Reference</summary>
+        <div class="market-box" style="background:#f9f9f9;border-color:#ddd;color:#444;margin:8px 0 0 0">
+          {"".join(ref_rows)}
+        </div>
+      </details>'''
+        elif rows:
             val_html = f'''
         <div class="market-box" style="background:#f9f9f9;border-color:#ddd;color:#444;margin-bottom:24px">
           <strong style="color:#888">Company Reference</strong>
@@ -1106,15 +1136,57 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
     need_price_or_val = is_spv and sell
     est_val_html = ""
     price_or_val_script = ""
+    share_count_html = f'''
+        <div class="field" style="margin-bottom:0">
+          <label>Number of Shares</label>
+          <input type="number" name="share_count" value="{share_val}" step="1" placeholder="e.g. 100000">
+        </div>'''
+    series_html = ""
+    series_script = ""
     if need_price_or_val:
-        est_val_cur = html.escape(fmt_valuation(parse_cf(cf, EST_VAL_FIELD)), quote=True)
+        share_count_html = ""  # SPV sells don't collect share count; stored value is left alone
+        _ev_stored = _num(str(parse_cf(cf, EST_VAL_FIELD) or "").replace(",", ""))
+        est_val_cur = f"${int(round(_ev_stored)):,}" if _ev_stored else ""
         est_val_html = f'''
       <div class="field">
-        <label>Est. Valuation</label>
-        <input type="text" name="est_valuation" value="{est_val_cur}" placeholder="e.g. $5B">
+        <label>Est. Valuation (Required if no Net Price)</label>
+        <input type="text" name="est_valuation" value="{est_val_cur}" placeholder="e.g. 150,000,000 or 150M" autocomplete="off">
+        <p id="estValReadout" style="font-size:13px;color:#1a4a8a;font-weight:600;margin:4px 0 0 0;min-height:1em"></p>
+        <p id="estValWarn" style="display:none;font-size:13px;color:#b91c1c;font-weight:600;margin:4px 0 0 0;">{EST_VAL_SMALL_MSG}</p>
         <p style="font-size:12px;color:#888;margin:4px 0 0 0;">New allocation? Leave the price blank and enter the estimated company valuation instead.</p>
         <p id="priceOrValErr" style="display:none;font-size:13px;color:#b91c1c;font-weight:600;margin:6px 0 0 0;">{PRICE_OR_VAL_MSG}</p>
       </div>'''
+        _ser_raw = parse_cf(cf, SERIES_FIELD)
+        try:
+            _ser_cur = int(float(str(_ser_raw))) if _ser_raw not in (None, "") else None
+        except (ValueError, TypeError):
+            _ser_cur = None
+        _pref = sc_cur == str(PREFERRED_CLASS_ID)
+        _ser_opts = '<option value="">&mdash; Select &mdash;</option>' + "".join(
+            f'<option value="{sid}"{" selected" if sid == _ser_cur else ""}>{lbl}</option>'
+            for sid, lbl in SERIES_OPTS
+        )
+        series_html = f'''
+        <div class="field" id="seriesField" style="margin-bottom:0{"" if _pref else ";display:none"}">
+          <label>Series (for our records only &mdash; not shown to buyers)</label>
+          <select name="series"{"" if _pref else " disabled"} style="width:100%;padding:10px;border:1px solid #ccc;border-radius:6px;font-size:14px;background:#fff">
+            {_ser_opts}
+          </select>
+        </div>'''
+        series_script = f"""
+    <script>
+    (function() {{
+      var cls = document.querySelector('[name="share_class"]');
+      var box = document.getElementById('seriesField');
+      if (!cls || !box) return;
+      var sel = box.querySelector('select');
+      cls.addEventListener('change', function() {{
+        var on = cls.value === '{PREFERRED_CLASS_ID}';
+        box.style.display = on ? '' : 'none';
+        sel.disabled = !on;
+      }});
+    }})();
+    </script>"""
         price_or_val_script = f"""
     <script>
     (function() {{
@@ -1123,7 +1195,59 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
       var p = form.querySelector('[name="{price_field}"]');
       var v = form.querySelector('[name="est_valuation"]');
       var err = document.getElementById('priceOrValErr');
+      var out = document.getElementById('estValReadout');
+      var warn = document.getElementById('estValWarn');
+      var SUF = {{'': 1, k: 1e3, thousand: 1e3, m: 1e6, mm: 1e6, mn: 1e6, mil: 1e6, million: 1e6,
+                 b: 1e9, bn: 1e9, bil: 1e9, billion: 1e9, t: 1e12, tn: 1e12, trillion: 1e12}};
       function blank(el) {{ return !el || !el.value.trim(); }}
+      // Mirrors parse_valuation, without the $1M floor (so small values can be flagged).
+      function parseVal(raw) {{
+        var s = String(raw || '').toLowerCase().replace(/[$,\\s]/g, '');
+        var m = s.match(/^(\\d+(?:\\.\\d*)?|\\.\\d+)([a-z]*)$/);
+        if (!m || !Object.prototype.hasOwnProperty.call(SUF, m[2])) return null;
+        var n = parseFloat(m[1]) * SUF[m[2]];
+        return n > 0 ? n : null;
+      }}
+      // Mirrors fmt_valuation: $5B / $750M / $1.25B
+      function fmtVal(f) {{
+        var u = [[1e12, 'T'], [1e9, 'B'], [1e6, 'M'], [1e3, 'K']];
+        for (var i = 0; i < u.length; i++)
+          if (f >= u[i][0]) return '$' + (Math.round(f / u[i][0] * 100) / 100) + u[i][1];
+        return '$' + f.toLocaleString('en-US', {{maximumFractionDigits: 2}});
+      }}
+      // Plain digits get $ and commas as they type; shorthand (150M, 1.5B) is left as typed.
+      function reformat() {{
+        var raw = v.value;
+        if (/[a-z]/i.test(raw)) return;
+        var pos = v.selectionStart == null ? raw.length : v.selectionStart;
+        var sig = raw.slice(0, pos).replace(/[^0-9.]/g, '').length;
+        var clean = raw.replace(/[^0-9.]/g, '');
+        var dot = clean.indexOf('.');
+        if (dot >= 0) clean = clean.slice(0, dot + 1) + clean.slice(dot + 1).replace(/[.]/g, '');
+        if (!clean) {{ v.value = ''; return; }}
+        var ip = dot >= 0 ? clean.slice(0, dot) : clean;
+        var fp = dot >= 0 ? clean.slice(dot) : '';
+        var formatted = '$' + ip.replace(/[0-9](?=([0-9]{{3}})+$)/g, '$&,') + fp;
+        var i = 0, c = 0;
+        while (i < formatted.length && c < sig) {{ if (/[0-9.]/.test(formatted[i])) c++; i++; }}
+        v.value = formatted;
+        if (document.activeElement === v) v.setSelectionRange(i, i);
+      }}
+      function tooSmall() {{
+        var n = parseVal(v ? v.value : '');
+        return n !== null && n < 1e6;
+      }}
+      function update() {{
+        if (!v) return;
+        var n = parseVal(v.value);
+        if (out) out.textContent = n ? '= ' + fmtVal(n) : '';
+        if (warn) warn.style.display = tooSmall() ? 'block' : 'none';
+        if (err && !(blank(p) && blank(v))) err.style.display = 'none';
+      }}
+      if (v) {{
+        v.addEventListener('input', function() {{ reformat(); update(); }});
+        update();
+      }}
       form.addEventListener('submit', function(e) {{
         var s = e.submitter;
         if (s && (s.value === 'cancel' || s.value === 'hold')) return;
@@ -1132,6 +1256,12 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
           e.stopImmediatePropagation();
           if (err) err.style.display = 'block';
           if (p) p.focus();
+        }} else if (tooSmall()) {{
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          if (err) err.style.display = 'none';
+          if (warn) warn.style.display = 'block';
+          v.focus();
         }} else if (err) {{
           err.style.display = 'none';
         }}
@@ -1167,17 +1297,13 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
 
       {hiive_btn_html}
 
-      <div class="field-row" style="margin-bottom:20px">
-        <div class="field" style="margin-bottom:0">
-          <label>Number of Shares</label>
-          <input type="number" name="share_count" value="{share_val}" step="1" placeholder="e.g. 100000">
-        </div>
+      <div class="field-row" style="margin-bottom:20px">{share_count_html}
         <div class="field" style="margin-bottom:0">
           <label>Share Class <span style="color:#b91c1c">*</span></label>
           <select name="share_class" required style="width:100%;padding:10px;border:1px solid #ccc;border-radius:6px;font-size:14px;background:#fff">
             {share_class_options_html}
           </select>
-        </div>
+        </div>{series_html}
       </div>
 
       <div class="field-row" style="margin-bottom:20px">
@@ -1203,7 +1329,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         <input type="text" name="comments" placeholder="">
       </div>
 
-      {spv_fields_html}
+      {spv_fields_html}{ref_bottom_html}
 
       <div class="btn-row">
         <button type="submit" name="submit_action" value="confirm" class="btn-primary">✓ Confirm / Update</button>
@@ -1219,7 +1345,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
       Reference only. Not an offer to buy or sell securities.
     </p>
     {modal_html}
-    {price_or_val_script}
+    {price_or_val_script}{series_script}
     {popup_script}
     """
     return html_response(form_html)
@@ -1638,6 +1764,12 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
             if isinstance(structure, list):
                 submit_is_spv = 5077906 in [int(x) for x in structure if x]
 
+    # SPV sell orders don't collect share count: never write or clear it.
+    if submit_is_spv and sell and share_val:
+        logger.warning(f"Deal {deal_id}: ignoring posted share_count={share_val!r} on an SPV sell deal")
+        share_val = ""
+        eff_shares = _f(parse_cf(current_cf, SHARE_COUNT_FIELD))
+
     # SPV sell orders: Est. Valuation, and net price OR valuation is required.
     est_val_num = parse_valuation(est_val_raw) if (submit_is_spv and sell) else None
     if submit_is_spv and sell:
@@ -1711,6 +1843,10 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         except ValueError: pass
     if est_val_num is not None:
         custom[EST_VAL_FIELD] = est_val_num
+    series_val = params.get("series", "").strip()
+    if submit_is_spv and sell and share_class_val == str(PREFERRED_CLASS_ID) and series_val:
+        try: custom[SERIES_FIELD] = int(series_val)
+        except ValueError: pass
 
     # Max size: use the entered value if provided, otherwise derive shares x gross.
     if max_val:
@@ -1905,6 +2041,17 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
             _ev_old = fmt_valuation(parse_cf(current_cf, EST_VAL_FIELD)) or "—"
             _ev_new = fmt_valuation(est_val_num) if est_val_num is not None else _ev_old
             rows.append(("Est. valuation", _ev_old, _ev_new))
+            _SER_LABELS = dict(SERIES_OPTS)
+            def fmt_series(val):
+                if val in (None, ""):
+                    return "—"
+                try:
+                    return _SER_LABELS.get(int(float(str(val))), str(val))
+                except (ValueError, TypeError):
+                    return str(val)
+            _ser_old = parse_cf(current_cf, SERIES_FIELD)
+            _ser_new = custom.get(SERIES_FIELD)
+            rows.append(("Series", fmt_series(_ser_old), fmt_series(_ser_new if _ser_new is not None else _ser_old)))
         rows += [
             ("Upfront fee", fmt_pct(parse_cf(current_cf, SELLER_FEE_FIELD)),  fmt_pct(seller_fee_val or parse_cf(current_cf, SELLER_FEE_FIELD))),
             ("Mgmt fee",    fmt_pct(parse_cf(current_cf, MGMT_FEE_FIELD)),    fmt_pct(mgmt_fee_val or parse_cf(current_cf, MGMT_FEE_FIELD))),
