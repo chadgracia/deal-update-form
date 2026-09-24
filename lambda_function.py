@@ -20,6 +20,7 @@ import os
 import hmac
 import html
 import hashlib
+import re
 import base64
 import boto3
 from datetime import datetime, timezone
@@ -98,6 +99,7 @@ FUND_EXEMPT_FIELD = "custom_label_4006089"
 SELLER_ROLE_FIELD = "custom_label_3938748"
 DEADLINE_FIELD    = "custom_label_4006402"
 SELLER_FEE_FIELD  = "custom_label_3940560"
+EST_VAL_FIELD     = "custom_label_4009563"
 SHARE_COUNT_FIELD = "custom_label_3070843"
 SHARE_CLASS_FIELD = "custom_label_3064330"
 REFRESH_FIELD     = "custom_label_3994687"
@@ -229,6 +231,41 @@ def commission_rate_for_size(size) -> float:
     if size < 10_000_000:
         return 0.03
     return 0.025
+
+
+_VAL_SUFFIX = {
+    "": 1, "k": 1e3, "thousand": 1e3,
+    "m": 1e6, "mm": 1e6, "mn": 1e6, "mil": 1e6, "million": 1e6,
+    "b": 1e9, "bn": 1e9, "bil": 1e9, "billion": 1e9,
+    "t": 1e12, "tn": 1e12, "trillion": 1e12,
+}
+
+
+def parse_valuation(raw):
+    """Flexible valuation input ("5B", "$500M", "2.5bn", "750k", "5,000,000,000") -> dollars, or None."""
+    if raw in (None, ""):
+        return None
+    s = str(raw).strip().lower().replace("$", "").replace(",", "").replace(" ", "")
+    m = re.fullmatch(r"(\d+(?:\.\d+)?|\.\d+)([a-z]*)", s)
+    if not m or m.group(2) not in _VAL_SUFFIX:
+        return None
+    val = float(m.group(1)) * _VAL_SUFFIX[m.group(2)]
+    return round(val, 2) if val > 0 else None
+
+
+def fmt_valuation(val):
+    """Dollars -> "$5B" / "$750M" / "$1.25B". Empty string when missing."""
+    if val in (None, ""):
+        return ""
+    try:
+        f = float(str(val).replace(",", ""))
+    except (ValueError, TypeError):
+        return str(val)
+    for div, suf in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if abs(f) >= div:
+            n = f"{round(f / div, 2):.2f}".rstrip("0").rstrip(".")
+            return f"${n}{suf}"
+    return f"${f:,.0f}"
 
 
 def is_sell(cf) -> bool:
@@ -491,6 +528,9 @@ def html_response(body_html: str, status: int = 200) -> dict:
     }
 
 
+PRICE_OR_VAL_MSG = "Enter either a net price or an estimated valuation."
+
+
 def error_page(msg: str) -> dict:
     return html_response(f'<h1>Something went wrong</h1><p class="subtitle" style="margin-top:12px">{msg}</p>', 400)
 
@@ -656,6 +696,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
                 hiive_ref_f = round(float(str(hiive_price).replace(",", ".")))
                 if sell:
                     rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0"><span style="color:#888">Market price</span><span style="font-weight:500">${hiive_ref_f:,}/share (gross — buyer&rsquo;s all-in price incl. commission) &asymp; ${_to_net(hiive_ref_f):,.2f}/share net to you</span></div>')
+                    rows.append('<div style="font-size:12px;color:#888;padding:0 0 6px 0">Market prices shown on this page are gross (what buyers pay). Your net is the amount you want after our commission and any one-time fee.</div>')
                 else:
                     rows.append(f'<div style="display:flex;justify-content:space-between;padding:6px 0"><span style="color:#888">Approximate market price</span><span style="font-weight:500">${hiive_ref_f:,}/share</span></div>')
             except (ValueError, TypeError):
@@ -1030,7 +1071,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
 
     # Build Hiive match button
     hiive_btn_html = ""
-    if hiive_price:
+    if hiive_price and not is_spv:
         try:
             hiive_mkt = round(float(str(hiive_price).replace(",", ".")))
             show_match = False
@@ -1058,6 +1099,43 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         except (ValueError, TypeError):
             pass
 
+    # SPV sell orders: Est. Valuation input; seller must give net price OR valuation.
+    need_price_or_val = is_spv and sell
+    est_val_html = ""
+    price_or_val_script = ""
+    if need_price_or_val:
+        est_val_cur = html.escape(fmt_valuation(parse_cf(cf, EST_VAL_FIELD)), quote=True)
+        est_val_html = f'''
+      <div class="field">
+        <label>Est. Valuation</label>
+        <input type="text" name="est_valuation" value="{est_val_cur}" placeholder="e.g. $5B">
+        <p style="font-size:12px;color:#888;margin:4px 0 0 0;">New allocation? Leave the price blank and enter the estimated company valuation instead.</p>
+        <p id="priceOrValErr" style="display:none;font-size:13px;color:#b91c1c;font-weight:600;margin:6px 0 0 0;">{PRICE_OR_VAL_MSG}</p>
+      </div>'''
+        price_or_val_script = f"""
+    <script>
+    (function() {{
+      var form = document.querySelector('form');
+      if (!form) return;
+      var p = form.querySelector('[name="{price_field}"]');
+      var v = form.querySelector('[name="est_valuation"]');
+      var err = document.getElementById('priceOrValErr');
+      function blank(el) {{ return !el || !el.value.trim(); }}
+      form.addEventListener('submit', function(e) {{
+        var s = e.submitter;
+        if (s && (s.value === 'cancel' || s.value === 'hold')) return;
+        if (blank(p) && blank(v)) {{
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          if (err) err.style.display = 'block';
+          if (p) p.focus();
+        }} else if (err) {{
+          err.style.display = 'none';
+        }}
+      }});
+    }})();
+    </script>"""
+
     summary_current = (deal.get("summary") or "").strip()
     summary_display = summary_current if summary_current else "No public notes on file yet."
     form_html = f"""
@@ -1081,8 +1159,8 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
       <div class="field">
         <label>{price_label}</label>
         <input type="number" name="{price_field}" value="{price_current}" step="any" placeholder="e.g. 45.50">
-        {'<p style="font-size:12px;color:#888;margin:4px 0 0 0;">Market prices shown on this page are gross (what buyers pay). Your net is the gross minus Rainmaker&rsquo;s commission: 5% under $1M, 4% $1&ndash;5M, 3% $5&ndash;10M, 2.5% over $10M.</p>' if sell else ''}
       </div>
+{est_val_html}
 
       {hiive_btn_html}
 
@@ -1138,6 +1216,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
       Reference only. Not an offer to buy or sell securities.
     </p>
     {modal_html}
+    {price_or_val_script}
     {popup_script}
     """
     return html_response(form_html)
@@ -1529,6 +1608,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     layers_val   = params.get("layers", "").strip()
     fund_exempt_val = params.get("fund_exemption", "").strip()
     seller_fee_val = params.get("seller_fee", "").strip()
+    est_val_raw  = params.get("est_valuation", "").strip()
     comments     = params.get("comments", "").strip()
 
     sell       = is_sell(current_cf)
@@ -1545,6 +1625,24 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     eff_gross  = _f(gross_val) or _f(parse_cf(current_cf, GROSS_FIELD))
     eff_shares = _f(share_val) or _f(parse_cf(current_cf, SHARE_COUNT_FIELD))
     structure  = parse_cf(current_cf, STRUCTURE_FIELD)
+
+    # SPV detection (mirrors render_form logic)
+    submit_is_spv = False
+    if structure is not None:
+        try:
+            submit_is_spv = int(float(str(structure))) == 5077906
+        except (ValueError, TypeError):
+            if isinstance(structure, list):
+                submit_is_spv = 5077906 in [int(x) for x in structure if x]
+
+    # SPV sell orders: Est. Valuation, and net price OR valuation is required.
+    est_val_num = parse_valuation(est_val_raw) if (submit_is_spv and sell) else None
+    if submit_is_spv and sell:
+        if submit_action == "confirm" and not net_val and est_val_num is None:
+            logger.info(f"Deal {deal_id}: SPV sell submitted with neither net price nor valuation; nothing written")
+            return error_page(PRICE_OR_VAL_MSG)
+        if est_val_raw and est_val_num is None:
+            comments = f"Est. valuation (as typed): {est_val_raw}" + (f" | {comments}" if comments else "")
 
     # Sell-side: gross is always derived from net by commission tier, for every
     # structure. Tier basis: submitted max, else stored max, else shares × net.
@@ -1608,15 +1706,8 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     if seller_fee_val:
         try: custom[SELLER_FEE_FIELD] = float(seller_fee_val)
         except ValueError: pass
-
-    # SPV detection for email (mirrors render_form logic)
-    submit_is_spv = False
-    if structure is not None:
-        try:
-            submit_is_spv = int(float(str(structure))) == 5077906
-        except (ValueError, TypeError):
-            if isinstance(structure, list):
-                submit_is_spv = 5077906 in [int(x) for x in structure if x]
+    if est_val_num is not None:
+        custom[EST_VAL_FIELD] = est_val_num
 
     # Max size: use the entered value if provided, otherwise derive shares x gross.
     if max_val:
@@ -1807,6 +1898,10 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
          f"{fmt_email(min_val or parse_cf(current_cf, MIN_SIZE_FIELD))} – {fmt_email(new_max if new_max is not None else parse_cf(current_cf, MAX_SIZE_FIELD))}"),
     ]
     if submit_is_spv:
+        if sell:
+            _ev_old = fmt_valuation(parse_cf(current_cf, EST_VAL_FIELD)) or "—"
+            _ev_new = fmt_valuation(est_val_num) if est_val_num is not None else _ev_old
+            rows.append(("Est. valuation", _ev_old, _ev_new))
         rows += [
             ("Upfront fee", fmt_pct(parse_cf(current_cf, SELLER_FEE_FIELD)),  fmt_pct(seller_fee_val or parse_cf(current_cf, SELLER_FEE_FIELD))),
             ("Mgmt fee",    fmt_pct(parse_cf(current_cf, MGMT_FEE_FIELD)),    fmt_pct(mgmt_fee_val or parse_cf(current_cf, MGMT_FEE_FIELD))),
