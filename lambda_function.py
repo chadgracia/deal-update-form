@@ -1809,18 +1809,22 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         if est_val_raw and est_val_num is None:
             comments = f"Est. valuation (as typed): {est_val_raw}" + (f" | {comments}" if comments else "")
 
-    # Sell-side: gross is always derived from net by commission tier, for every
+    # Sell-side: estimate gross from net by commission tier, for every
     # structure. Tier basis: submitted max, else stored max, else shares × net.
+    # In memory only: Chad sets sell gross in Pipeline by hand, never the form.
     commission_rate = None
+    est_gross_sell  = None
     if sell and eff_net:
         tier_basis = _f(max_val) or _f(parse_cf(current_cf, MAX_SIZE_FIELD))
         if not tier_basis and eff_shares:
             tier_basis = eff_shares * eff_net
         commission_rate = commission_rate_for_size(tier_basis)
-        eff_gross = round(eff_net * (1 + commission_rate), 4)
+        est_gross_sell = round(eff_net * (1 + commission_rate), 4)
+    # Gross used for stage and Max Size derivation (estimate on sells).
+    calc_gross = est_gross_sell if est_gross_sell is not None else eff_gross
 
     has_shares    = bool(eff_shares)
-    has_price     = bool(eff_net) or bool(eff_gross)
+    has_price     = bool(eff_net) or bool(calc_gross)
     has_structure = bool(structure)
     if submit_is_spv and sell:
         # SPV sells: price OR valuation, plus max size and structure; share count not required.
@@ -1840,8 +1844,6 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     if gross_val:
         try: custom[GROSS_FIELD] = float(gross_val)
         except ValueError: pass
-    if commission_rate is not None:
-        custom[GROSS_FIELD] = eff_gross
     if share_val:
         try: custom[SHARE_COUNT_FIELD] = float(share_val)
         except ValueError: pass
@@ -1889,10 +1891,10 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     if max_val:
         try: custom[MAX_SIZE_FIELD] = float(max_val)
         except ValueError:
-            if eff_shares and eff_gross:
-                custom[MAX_SIZE_FIELD] = round(eff_shares * eff_gross, 2)
-    elif eff_shares and eff_gross:
-        custom[MAX_SIZE_FIELD] = round(eff_shares * eff_gross, 2)
+            if eff_shares and calc_gross:
+                custom[MAX_SIZE_FIELD] = round(eff_shares * calc_gross, 2)
+    elif eff_shares and calc_gross:
+        custom[MAX_SIZE_FIELD] = round(eff_shares * calc_gross, 2)
 
     payload = {"deal": {"deal_stage_id": new_stage, "custom_fields": custom}}
     result  = call_pipeline_api("PUT", f"/deals/{deal_id}.json", payload, jwt=jwt)
@@ -2055,12 +2057,15 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         try:
             hiive_px_f = float(str(hiive_px_raw).replace(",", "."))
             compare_price = float(str(gross_after).replace("$", "").replace(",", "")) if gross_after not in ("—", None, "") else None
+            est_tag = ""
+            if sell_deal and not compare_price and est_gross_sell:
+                compare_price, est_tag = est_gross_sell, " (est.)"
             if compare_price and hiive_px_f:
                 pct = ((compare_price - hiive_px_f) / hiive_px_f) * 100
                 if pct >= 0:
-                    mkt_premium_str = f'<span style="color:#16a34a">+{pct:.1f}% premium</span>'
+                    mkt_premium_str = f'<span style="color:#16a34a">+{pct:.1f}% premium{est_tag}</span>'
                 else:
-                    mkt_premium_str = f'<span style="color:#dc2626">{pct:.1f}% discount</span>'
+                    mkt_premium_str = f'<span style="color:#dc2626">{pct:.1f}% discount{est_tag}</span>'
         except (ValueError, TypeError):
             pass
 
@@ -2133,7 +2138,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         *table_lines,
     ]
     if commission_rate is not None and eff_net:
-        email_lines.append(f"(gross = net × {1 + commission_rate:g} ({commission_rate * 100:g}% tier) = ${eff_gross:,.2f}/share)")
+        email_lines.append(f"(gross = net × {1 + commission_rate:g} ({commission_rate * 100:g}% tier) = ${est_gross_sell:,.2f}/share est.)")
     if comments:
         email_lines += ["", f"Client note (may need a public-notes update): {comments}"]
     email_lines += ["", "Refresh reset to 60 days."]
