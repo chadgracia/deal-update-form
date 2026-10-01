@@ -90,6 +90,7 @@ PIPELINE_JWT_KEY    = "pipeline-jwt.json"
 
 GROSS_FIELD       = "custom_label_3064339"
 NET_FIELD         = "custom_label_3064369"
+GROSS_CLEAR_FAIL_MSG = "Gross price did NOT clear — clear manually in Pipeline"
 MIN_SIZE_FIELD    = "custom_label_3065488"
 MAX_SIZE_FIELD    = "custom_label_3064645"
 MGMT_FEE_FIELD    = "custom_label_3940558"
@@ -1780,6 +1781,16 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         logger.warning(f"Deal {deal_id}: ignoring posted net={net_val!r} on a buy deal")
         net_val = ""
 
+    # Sell net change: stored gross is now stale, so clear it (0 clears in
+    # Pipeline; null doesn't). Unchanged or absent net leaves gross untouched.
+    gross_clear = False
+    if sell and net_val:
+        try: new_net_f = float(net_val)
+        except ValueError: new_net_f = None
+        stored_net = _f(parse_cf(current_cf, NET_FIELD))
+        if new_net_f is not None and (stored_net is None or abs(new_net_f - stored_net) > 0.0001):
+            gross_clear = True
+
     eff_net    = _f(net_val)   or _f(parse_cf(current_cf, NET_FIELD))
     eff_gross  = _f(gross_val) or _f(parse_cf(current_cf, GROSS_FIELD))
     eff_shares = _f(share_val) or _f(parse_cf(current_cf, SHARE_COUNT_FIELD))
@@ -1821,7 +1832,11 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         commission_rate = commission_rate_for_size(tier_basis)
         est_gross_sell = round(eff_net * (1 + commission_rate), 4)
     # Gross used for stage and Max Size derivation (estimate on sells).
-    calc_gross = est_gross_sell if est_gross_sell is not None else eff_gross
+    # A gross being cleared never counts on its own.
+    if est_gross_sell is not None:
+        calc_gross = est_gross_sell
+    else:
+        calc_gross = None if gross_clear else eff_gross
 
     has_shares    = bool(eff_shares)
     has_price     = bool(eff_net) or bool(calc_gross)
@@ -1844,6 +1859,8 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     if gross_val:
         try: custom[GROSS_FIELD] = float(gross_val)
         except ValueError: pass
+    if gross_clear:
+        custom[GROSS_FIELD] = 0
     if share_val:
         try: custom[SHARE_COUNT_FIELD] = float(share_val)
         except ValueError: pass
@@ -1935,6 +1952,16 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         )
         return error_page("We couldn't save your update right now. Chad has been notified.")
 
+    # Confirm the stale sell gross actually cleared; never blocks the seller.
+    gross_clear_failed = False
+    if gross_clear:
+        chk = call_pipeline_api("GET", f"/deals/{deal_id}.json", jwt=jwt)
+        chk_cf = (chk["data"] or {}).get("custom_fields", {}) if chk["status"] == 200 and isinstance(chk["data"], dict) else None
+        chk_gross = parse_cf(chk_cf, GROSS_FIELD) if chk_cf is not None else "unverified"
+        if chk_gross not in (None, "", 0):
+            gross_clear_failed = True
+            logger.error(f"Deal {deal_id}: gross clear not confirmed (GET {chk['status']}, gross={chk_gross!r})")
+
     contact_id = (current_deal.get("primary_contact") or {}).get("id", 0)
     contact_email = ""
     if contact_id:
@@ -2010,6 +2037,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     new_gross     = custom.get(GROSS_FIELD)
     net_after     = new_net   if new_net   is not None else current_net
     gross_after   = new_gross if new_gross is not None else current_gross
+    gross_after_disp = "— (cleared)" if gross_clear else fmt_email(gross_after)
 
     # Market row from company Hiive Bid/Ask (sell → bid, buy → ask)
     sell_deal     = is_sell(current_cf)
@@ -2056,7 +2084,8 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     if hiive_px_raw not in (None, ""):
         try:
             hiive_px_f = float(str(hiive_px_raw).replace(",", "."))
-            compare_price = float(str(gross_after).replace("$", "").replace(",", "")) if gross_after not in ("—", None, "") else None
+            compare_src = None if gross_clear else gross_after
+            compare_price = float(str(compare_src).replace("$", "").replace(",", "")) if compare_src not in ("—", None, "") else None
             est_tag = ""
             if sell_deal and not compare_price and est_gross_sell:
                 compare_price, est_tag = est_gross_sell, " (est.)"
@@ -2072,7 +2101,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     rows = [
         ("Net price",   fmt_email(current_net),   fmt_email(net_after)),
         ("vs Market",   "",                       mkt_premium_str),
-        ("Gross price", fmt_email(current_gross), fmt_email(gross_after)),
+        ("Gross price", fmt_email(current_gross), gross_after_disp),
         ("Shares",      fmt_count(parse_cf(current_cf, SHARE_COUNT_FIELD)), fmt_count(new_shares if new_shares is not None else parse_cf(current_cf, SHARE_COUNT_FIELD))),
         ("Size",
          f"{fmt_email(parse_cf(current_cf, MIN_SIZE_FIELD))} – {fmt_email(parse_cf(current_cf, MAX_SIZE_FIELD))}",
@@ -2139,6 +2168,8 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     ]
     if commission_rate is not None and eff_net:
         email_lines.append(f"(gross = net × {1 + commission_rate:g} ({commission_rate * 100:g}% tier) = ${est_gross_sell:,.2f}/share est.)")
+    if gross_clear_failed:
+        email_lines += ["", GROSS_CLEAR_FAIL_MSG]
     if comments:
         email_lines += ["", f"Client note (may need a public-notes update): {comments}"]
     email_lines += ["", "Refresh reset to 60 days."]
@@ -2199,8 +2230,13 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
     )
 
     comments_html = ""
+    if gross_clear_failed:
+        comments_html += (
+            '<p style="margin:16px 0 0 0;font-size:13px;color:#b91c1c;font-weight:600;">'
+            f'{GROSS_CLEAR_FAIL_MSG}</p>'
+        )
     if comments:
-        comments_html = (
+        comments_html += (
             '<p style="margin:16px 0 0 0;font-size:13px;color:#4b5563;">'
             '<span style="font-weight:600;color:#1f2937;">Client note:</span> '
             f'{comments}</p>'
