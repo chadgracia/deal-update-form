@@ -32,9 +32,15 @@ logger.setLevel(logging.INFO)
 HMAC_SECRET         = os.environ.get("HMAC_SECRET", "change-me-in-env")
 # Dedicated key for DEAL-link tokens (?deal_id=X&token=Y): every update-form
 # link generator (syndicate-dash, portfolio-deploy, deal-nudge, stale deal
-# scanner) signs with it. HMAC_SECRET stays for unsubscribe, "new order"
-# and Q&A answer links. Read from env only -- never committed.
+# scanner) signs with it, as do New Order person tokens (old HMAC_SECRET
+# ones still verify). HMAC_SECRET stays for unsubscribe and Q&A answer
+# links. Read from env only -- never committed.
 FORM_HMAC_SECRET    = os.environ.get("FORM_HMAC_SECRET", "")
+# gg_id sign-in cookie key, shared with trades / CRMDealDetails / syndicate-dash.
+# Read from env only -- never committed. Unset -> nobody counts as signed in.
+IDENTITY_SECRET     = os.environ.get("IDENTITY_SECRET", "")
+SIGN_IN_URL         = "https://trades.graciagroup.com/?login=1"
+WHITELIST_TAG_ID    = 3280123
 SES_SENDER          = "agent@agent.graciagroup.com"
 AGENT_EMAIL         = "agent@agent.graciagroup.com"
 CHAD_EMAIL          = "cgracia@rainmakersecurities.com"
@@ -123,6 +129,19 @@ HIIVE_PRICE_FIELD = "custom_label_3999575"
 HIIVE_ASK_DATE_FIELD = "custom_label_3997299"
 HIIVE_BID_DATE_FIELD = "custom_label_3997300"
 DIRECT_STRUCTURE_ID  = 6250090
+SPV_STRUCTURE_ID     = 5077906
+FORWARD_STRUCTURE_ID = 5077903
+# New Order structure choices per side: posted value -> (label, STRUCTURE_FIELD ids).
+NEW_ORDER_STRUCTURES = {
+    "sell": {"6250090": ("Direct shares",    [DIRECT_STRUCTURE_ID]),
+             "5077906": ("SPV units",        [SPV_STRUCTURE_ID]),
+             "5077903": ("Forward contract", [FORWARD_STRUCTURE_ID])},
+    "buy":  {"6250090": ("Direct", [DIRECT_STRUCTURE_ID]),
+             "5077906": ("SPV",    [SPV_STRUCTURE_ID]),
+             "6250090,5077906": ("Either", [DIRECT_STRUCTURE_ID, SPV_STRUCTURE_ID])},
+}
+CLOSED_STAGE_NAMES   = {"obsolete", "lost", "won", "trade broken"}
+NEW_ORDER_GUARD_SECS = 600   # double-submit window for New Order creates
 SELL_TYPE_ID      = 5011675
 BUY_TYPE_ID       = 5077819
 
@@ -172,6 +191,155 @@ def verify_token(id_value: int, token: str) -> bool:
     expected = hmac.new(HMAC_SECRET.encode(), str(id_value).encode(), hashlib.sha256).digest()
     expected_b64 = base64.urlsafe_b64encode(expected).decode().rstrip("=")
     return hmac.compare_digest(expected_b64, token)
+
+
+def make_new_token(pid, sso_email: str = "") -> str:
+    """New-order token, signed with FORM_HMAC_SECRET. Token links sign
+    "new:{pid}"; a signed-in (gg_id) page also binds the email
+    ("new-sso:{pid}:{email}") so the POST knows how they arrived."""
+    if sso_email:
+        return _sign(FORM_HMAC_SECRET, f"new-sso:{pid}:{sso_email.lower()}")
+    return _sign(FORM_HMAC_SECRET or HMAC_SECRET, f"new:{pid}")
+
+
+def verify_new_token(pid, token: str, sso_email: str = "") -> bool:
+    """Token links: FORM_HMAC_SECRET or the old HMAC_SECRET (emailed links keep
+    working). Signed-in tokens were only ever minted with FORM_HMAC_SECRET."""
+    token = token or ""
+    if sso_email:
+        return bool(FORM_HMAC_SECRET) and hmac.compare_digest(
+            _sign(FORM_HMAC_SECRET, f"new-sso:{pid}:{sso_email.lower()}"), token)
+    if FORM_HMAC_SECRET and hmac.compare_digest(_sign(FORM_HMAC_SECRET, f"new:{pid}"), token):
+        return True
+    return hmac.compare_digest(_sign(HMAC_SECRET, f"new:{pid}"), token)
+
+
+def _get_cookie(event, name):
+    """Read a cookie value from a payload-v2 request, else None."""
+    for c in (event.get("cookies") or []):
+        if c.startswith(name + "="):
+            return c.split("=", 1)[1]
+    hdr = (event.get("headers") or {}).get("cookie", "")
+    for c in hdr.split(";"):
+        c = c.strip()
+        if c.startswith(name + "="):
+            return c.split("=", 1)[1]
+    return None
+
+
+def read_identity_email(event):
+    """Verified email from the gg_id cookie (base64url "email|hexsig",
+    HMAC-SHA256 with IDENTITY_SECRET), or None. Mirrors chadgracia/trades
+    _read_identity_email. Never raises."""
+    if not IDENTITY_SECRET:
+        return None
+    raw = _get_cookie(event or {}, "gg_id")
+    if not raw:
+        return None
+    try:
+        decoded = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)).decode()
+        email, sig = decoded.rsplit("|", 1)
+        expected = hmac.new(IDENTITY_SECRET.encode(), email.encode(),
+                            hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, sig):
+            return None
+        return email.strip() or None
+    except Exception:
+        return None
+
+
+def _tag_ids(person) -> set:
+    out = set()
+    for t in (person.get("predefined_contacts_tag_ids") or []):
+        try: out.add(int(t))
+        except (ValueError, TypeError): pass
+    return out
+
+
+def find_people_by_email(email: str, jwt) -> list:
+    """Pipeline people whose email (any slot) matches, via one live lookup.
+    Falls back to the people_index.json portfolio-deploy resolves gg_id
+    sign-ins with when the live lookup finds nobody."""
+    target = (email or "").strip().lower()
+    if not target:
+        return []
+    matches = []
+    res = call_pipeline_api("GET", f"/people.json?conditions[email]={urllib.parse.quote(target)}&per_page=25", jwt=jwt)
+    if res["status"] == 200 and isinstance(res["data"], dict):
+        for p in res["data"].get("entries") or []:
+            slots = {(p.get(f) or "").strip().lower() for f in ("email", "email2", "home_email")}
+            if target in slots:
+                matches.append(p)
+    if not matches:
+        try:
+            obj = boto3.client("s3").get_object(Bucket="full-pipeline-cache", Key="people_index.json")
+            idx_id = json.loads(obj["Body"].read()).get("by_email", {}).get(target)
+        except Exception as e:
+            logger.warning(f"people_index lookup failed: {e}")
+            idx_id = None
+        if idx_id:
+            got = call_pipeline_api("GET", f"/people/{idx_id}.json", jwt=jwt)
+            if got["status"] == 200 and isinstance(got["data"], dict) and got["data"].get("id"):
+                matches.append(got["data"])
+    return matches
+
+
+def pick_person(matches: list) -> dict:
+    """Whitelist-tagged person first, else the most recently updated."""
+    pool = [p for p in matches if WHITELIST_TAG_ID in _tag_ids(p)] or matches
+    return max(pool, key=lambda p: str(p.get("updated_at") or ""))
+
+
+def _person_name(person: dict) -> str:
+    return ((person.get("full_name") or "").strip()
+            or f"{person.get('first_name') or ''} {person.get('last_name') or ''}".strip())
+
+
+def _utcnow():
+    return datetime.now(timezone.utc)
+
+
+def new_order_lock_age(s3, key: str):
+    """Seconds since the New Order lock at key was written, or None if absent."""
+    try:
+        obj = s3.get_object(Bucket=QA_BUCKET, Key=key)
+    except Exception:
+        return None
+    try:
+        created = datetime.fromisoformat(json.loads(obj["Body"].read())["created_at"])
+    except Exception:
+        created = obj.get("LastModified")
+    if not created:
+        return None
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return (_utcnow() - created).total_seconds()
+
+
+def open_orders_for(pid: int, cid: int, type_id: int) -> list:
+    """Ids of the person's live (not Obsolete/Lost/Won/Trade Broken) deals for
+    this company and side, from the deals.json snapshot. [] on any error."""
+    try:
+        obj = boto3.client("s3").get_object(Bucket="full-pipeline-cache", Key="deals.json")
+        data = json.loads(obj["Body"].read())
+        deals_list = data if isinstance(data, list) else (data.get("deals") or [])
+    except Exception as e:
+        logger.warning(f"new-order: open-order check skipped, deals.json unreadable: {e}")
+        return []
+    out = []
+    for d in deals_list:
+        contact = d.get("primary_contact_id") or (d.get("primary_contact") or {}).get("id")
+        if str(contact) != str(pid) or (d.get("company") or {}).get("id") != cid:
+            continue
+        types = (d.get("custom_fields") or {}).get(DEAL_TYPE_FIELD)
+        types = types if isinstance(types, list) else [types]
+        if type_id not in [int(t) for t in types if str(t).strip().isdigit()]:
+            continue
+        stage = d.get("deal_stage") or {}
+        if stage.get("id") == OBSOLETE_STAGE_ID or (stage.get("name") or "").strip().lower() in CLOSED_STAGE_NAMES:
+            continue
+        out.append(d.get("id"))
+    return out
 
 
 def call_pipeline_api(method, endpoint, payload=None, jwt=None):
@@ -1404,9 +1572,149 @@ def success_page(message: str, subtitle: str = None) -> dict:
     return html_response(html)
 
 
+# ── New Order pages ───────────────────────────────────────────────────────────
+
+def render_new_order_page(pid: int, first_name: str, token: str, sso_email: str = "") -> dict:
+    companies = {}
+    try:
+        s3  = boto3.client("s3")
+        obj = s3.get_object(Bucket="full-pipeline-cache", Key="deals.json")
+        data = json.loads(obj["Body"].read())
+        deals_list = data if isinstance(data, list) else (data.get("deals") or [])
+        for d in deals_list:
+            c = d.get("company") or {}
+            cid, cname = c.get("id"), (c.get("name") or "").strip()
+            if cid and cname:
+                companies[cid] = cname
+    except Exception as e:
+        logger.warning(f"new-order: failed to load deals.json: {e}")
+
+    company_options = "".join(
+        f'<option value="{cid}">{html.escape(cname)}</option>'
+        for cid, cname in sorted(companies.items(), key=lambda kv: kv[1].lower())
+    )
+
+    def structure_group(side_key, hint):
+        radios = "".join(
+            f'<label style="font-weight:normal;"><input type="radio" name="structure" value="{val}" required> {html.escape(label)}</label>'
+            for val, (label, _ids) in NEW_ORDER_STRUCTURES[side_key].items()
+        )
+        return (f'<div id="st-{side_key}">'
+                f'<p class="st-hint" style="font-size:12px;color:#888;margin:6px 0 4px 0;">{hint}</p>'
+                f'<div style="display:flex;flex-wrap:wrap;gap:8px 24px;margin-top:6px;">{radios}</div></div>')
+
+    sso_hidden = f'<input type="hidden" name="new_email" value="{html.escape(sso_email)}">' if sso_email else ""
+    body = f"""
+    <h1>New Order</h1>
+    <p class="subtitle">Hello{f" {html.escape(first_name)}" if first_name else ""}! Tell us what you'd like to buy or sell. You'll enter price and size on the next screen.</p>
+
+    <form method="POST" id="new-order">
+      <input type="hidden" name="new_person_id" value="{pid}">
+      <input type="hidden" name="new_token" value="{html.escape(token)}">
+      {sso_hidden}
+      <input type="text" name="website" value="" style="position:absolute;left:-9999px;" tabindex="-1" autocomplete="off">
+
+      <div class="field">
+        <label>I want to</label>
+        <div style="display:flex;gap:24px;margin-top:6px;">
+          <label style="font-weight:normal;"><input type="radio" name="side" value="buy" required> Buy</label>
+          <label style="font-weight:normal;"><input type="radio" name="side" value="sell" required> Sell</label>
+        </div>
+      </div>
+
+      <div class="field" id="st-wrap">
+        <label>Structure</label>
+        {structure_group("sell", "If selling:")}
+        {structure_group("buy", "If buying:")}
+      </div>
+
+      <div class="field">
+        <label>Company</label>
+        <select name="company_id" required style="width:100%;padding:10px;font-size:15px;">
+          <option value="">— Select a company —</option>
+          {company_options}
+          <option value="other">My company isn't listed</option>
+        </select>
+        <div id="co-other" style="margin-top:10px;">
+          <label style="font-weight:normal;font-size:13px;">Company name (if not listed)</label>
+          <input type="text" name="company_other" maxlength="120" autocomplete="off" style="width:100%;padding:10px;font-size:15px;">
+        </div>
+      </div>
+
+      <div class="actions">
+        <button type="submit" name="submit_action" value="create" class="btn-primary">Continue →</button>
+      </div>
+    </form>
+    <p style="text-align:center;font-size:11px;color:#bbb;margin-top:16px;">
+      Reference only. Not an offer to buy or sell securities.
+    </p>
+    <script>
+    (function() {{
+      var f = document.getElementById('new-order');
+      f.querySelectorAll('.st-hint').forEach(function(h) {{ h.style.display = 'none'; }});
+      function sync() {{
+        var r = f.querySelector('input[name=side]:checked'), side = r ? r.value : '';
+        document.getElementById('st-wrap').style.display = side ? '' : 'none';
+        ['sell', 'buy'].forEach(function(k) {{
+          var box = document.getElementById('st-' + k), show = (side === k);
+          box.style.display = show ? '' : 'none';
+          box.querySelectorAll('input').forEach(function(i) {{ i.disabled = !show; if (!show) i.checked = false; }});
+        }});
+        var other = (f.company_id.value === 'other'), box = document.getElementById('co-other');
+        box.style.display = other ? '' : 'none';
+        box.querySelector('input').required = other;
+      }}
+      f.addEventListener('change', sync);
+      sync();
+    }})();
+    </script>
+    """
+    return html_response(body)
+
+
+def sign_in_page() -> dict:
+    return html_response(f"""
+    <h1>New Order</h1>
+    <p class="subtitle" style="margin-top:12px">Sign in to add a buy or sell order.</p>
+    <div class="actions" style="margin-top:20px">
+      <a href="{SIGN_IN_URL}" class="btn-primary" style="display:inline-block;text-decoration:none;text-align:center;">Sign in to add an order</a>
+    </div>
+    """)
+
+
+def unknown_signin_page(email: str) -> dict:
+    """Signed in, but the email isn't in Pipeline: create nothing, tell Chad
+    (once per address per UTC day so reloads don't spam)."""
+    day = _utcnow().strftime("%Y-%m-%d")
+    digest = hashlib.sha256(email.lower().encode()).hexdigest()[:32]
+    first = True
+    try:
+        boto3.client("s3", region_name="us-east-1").put_object(
+            Bucket=QA_BUCKET, Key=f"new-order-unknown/{day}/{digest}.lock",
+            Body=email.lower().encode(), IfNoneMatch="*")
+    except Exception as e:
+        first = "PreconditionFailed" not in str(e)
+    if first:
+        send_email(
+            CHAD_EMAIL,
+            f"New order request from unknown sign-in: {email}",
+            f"{email} is signed in (gg_id) and opened New Order, but no Pipeline person has that email.\n"
+            f"Nothing was created. Set them up and follow up.",
+            html=email_html(
+                f'<p style="margin:0 0 12px 0;"><strong>{html.escape(email)}</strong> is signed in (gg_id) and opened '
+                f'New Order, but no Pipeline person has that email.</p>'
+                f'<p style="margin:0;font-size:13px;">Nothing was created. Set them up and follow up.</p>'
+            ),
+        )
+    return html_response(
+        '<h1>Thanks</h1>'
+        '<p class="subtitle" style="margin-top:12px">Thanks — we\'ll set this up for you and follow up shortly.</p>'
+    )
+
+
 # ── GET handler ───────────────────────────────────────────────────────────────
 
-def handle_get(params: dict) -> dict:
+def handle_get(params: dict, event: dict = None) -> dict:
     action = params.get("action", "")
 
     if action == "unsubscribe":
@@ -1440,73 +1748,35 @@ def handle_get(params: dict) -> dict:
     if action == "new":
         person_id = params.get("person_id", "")
         token     = params.get("token", "")
-        try:
-            pid = int(person_id)
-        except (ValueError, TypeError):
-            return error_page("Invalid link.")
-        if not verify_token(f"new:{pid}", token):
-            return error_page("Invalid or expired link.")
+        if person_id or token:
+            # Emailed token link
+            try:
+                pid = int(person_id)
+            except (ValueError, TypeError):
+                return error_page("Invalid link.")
+            if not verify_new_token(pid, token):
+                return error_page("Invalid or expired link.")
+            jwt = get_jwt()
+            p_result = call_pipeline_api("GET", f"/people/{pid}.json", jwt=jwt)
+            if p_result["status"] != 200 or not isinstance(p_result["data"], dict):
+                return error_page("Contact not found.")
+            first_name = (p_result["data"].get("first_name") or "").strip()
+            return render_new_order_page(pid, first_name, make_new_token(pid))
 
+        # No token: signed in on trades via the gg_id cookie?
+        email = read_identity_email(event)
+        if not email:
+            return sign_in_page()
+        if not FORM_HMAC_SECRET:
+            logger.error("new-order: FORM_HMAC_SECRET unset; signed-in New Order disabled")
+            return error_page("New orders are temporarily unavailable. Please reply to any of our emails and we'll set it up.")
         jwt = get_jwt()
-        p_result = call_pipeline_api("GET", f"/people/{pid}.json", jwt=jwt)
-        if p_result["status"] != 200:
-            return error_page("Contact not found.")
-        person = p_result["data"]
-        first_name = (person.get("first_name") or "").strip()
-
-        companies = {}
-        try:
-            s3  = boto3.client("s3")
-            obj = s3.get_object(Bucket="full-pipeline-cache", Key="deals.json")
-            data = json.loads(obj["Body"].read())
-            deals_list = data if isinstance(data, list) else (data.get("deals") or [])
-            for d in deals_list:
-                c = d.get("company") or {}
-                cid, cname = c.get("id"), (c.get("name") or "").strip()
-                if cid and cname:
-                    companies[cid] = cname
-        except Exception as e:
-            logger.warning(f"new-order: failed to load deals.json: {e}")
-
-        company_options = "".join(
-            f'<option value="{cid}">{html.escape(cname)}</option>'
-            for cid, cname in sorted(companies.items(), key=lambda kv: kv[1].lower())
-        )
-
-        body = f"""
-    <h1>New Order</h1>
-    <p class="subtitle">Hello{f" {first_name}" if first_name else ""}! Tell us what you'd like to buy or sell. You'll enter price and size on the next screen.</p>
-
-    <form method="POST">
-      <input type="hidden" name="new_person_id" value="{pid}">
-      <input type="hidden" name="new_token" value="{html.escape(token)}">
-      <input type="text" name="website" value="" style="position:absolute;left:-9999px;" tabindex="-1" autocomplete="off">
-
-      <div class="field">
-        <label>I want to</label>
-        <div style="display:flex;gap:24px;margin-top:6px;">
-          <label style="font-weight:normal;"><input type="radio" name="side" value="buy" required> Buy</label>
-          <label style="font-weight:normal;"><input type="radio" name="side" value="sell" required> Sell</label>
-        </div>
-      </div>
-
-      <div class="field">
-        <label>Company</label>
-        <select name="company_id" required style="width:100%;padding:10px;font-size:15px;">
-          <option value="">— Select a company —</option>
-          {company_options}
-        </select>
-      </div>
-
-      <div class="actions">
-        <button type="submit" name="submit_action" value="create" class="btn-primary">Continue →</button>
-      </div>
-    </form>
-    <p style="text-align:center;font-size:11px;color:#bbb;margin-top:16px;">
-      Reference only. Not an offer to buy or sell securities.
-    </p>
-    """
-        return html_response(body)
+        matches = find_people_by_email(email, jwt)
+        if not matches:
+            return unknown_signin_page(email)
+        person = pick_person(matches)
+        return render_new_order_page(int(person["id"]), (person.get("first_name") or "").strip(),
+                                     make_new_token(int(person["id"]), email), email.lower())
 
     deal_id_str = params.get("deal_id", "")
     token       = params.get("token", "")
@@ -1546,9 +1816,167 @@ def handle_get(params: dict) -> dict:
 
     contact_id = (deal.get("primary_contact") or {}).get("id", 0)
     unsub_url  = f"?action=unsubscribe&person_id={contact_id}&token={make_token(contact_id)}"
-    new_url    = f"?action=new&person_id={contact_id}&token={make_token(f'new:{contact_id}')}" if contact_id else ""
+    new_url    = f"?action=new&person_id={contact_id}&token={make_new_token(contact_id)}" if contact_id else ""
 
     return render_form(deal, company_rec, unsub_url, all_deals, new_url)
+
+
+# ── New Order create (POST) ──────────────────────────────────────────────────
+
+def handle_new_order_create(params: dict) -> dict:
+    # Honeypot: bots that fill the hidden field get a fake success, no write
+    if params.get("website", "").strip():
+        return success_page("Order received")
+    try:
+        new_pid = int(params.get("new_person_id", ""))
+    except (ValueError, TypeError):
+        return error_page("Invalid submission.")
+    # Identity: the token binds the person (and, for sign-ins, the gg_id email).
+    sso_email = params.get("new_email", "").strip().lower()
+    if not verify_new_token(new_pid, params.get("new_token", ""), sso_email):
+        return error_page("Invalid or expired link.")
+    arrival = f"Signed in on trades ({sso_email})" if sso_email else "Emailed token link"
+
+    side = params.get("side", "").strip().lower()
+    if side not in ("buy", "sell"):
+        return error_page("Please choose Buy or Sell.")
+    side_label = "Buy" if side == "buy" else "Sell"
+    structure_opts = NEW_ORDER_STRUCTURES[side]
+    structure_choice = structure_opts.get(params.get("structure", "").strip())
+    if not structure_choice:
+        names = " / ".join(label for label, _ in structure_opts.values())
+        return error_page(f"Please choose a structure for your {side_label.lower()} order ({names}).")
+    structure_label, structure_ids = structure_choice
+
+    new_cid, other_name = None, ""
+    if params.get("company_id", "").strip() == "other":
+        other_name = " ".join(params.get("company_other", "").split())[:120]
+        if not other_name:
+            return error_page("Please type your company's name, or pick it from the list.")
+        guard_co = "other-" + (re.sub(r"[^a-z0-9]+", "-", other_name.lower()).strip("-")[:60] or "unnamed")
+    else:
+        try:
+            new_cid = int(params.get("company_id", ""))
+        except (ValueError, TypeError):
+            return error_page("Please choose a company.")
+        guard_co = str(new_cid)
+
+    # Double-submit guard: only a resubmit within 10 minutes is blocked.
+    s3_lock = boto3.client("s3")
+    lock_key = f"new-order-locks/{new_pid}-{guard_co}-{side}.json"
+    lock_age = new_order_lock_age(s3_lock, lock_key)
+    if lock_age is not None and lock_age < NEW_ORDER_GUARD_SECS:
+        return html_response(
+            '<h1>Already received</h1>'
+            '<p class="subtitle" style="margin-top:12px">We just received this order. '
+            'If you would like to change it, just reply to any of our emails and we will '
+            'send you an update link.</p>'
+        )
+
+    jwt_new = get_jwt()
+    p_result = call_pipeline_api("GET", f"/people/{new_pid}.json", jwt=jwt_new)
+    if p_result["status"] != 200 or not isinstance(p_result["data"], dict):
+        return error_page("Contact not found.")
+    new_person = p_result["data"]
+    new_owner_id = new_person.get("owner_id")
+
+    if new_cid:
+        c_result = call_pipeline_api("GET", f"/companies/{new_cid}.json", jwt=jwt_new)
+        if c_result["status"] != 200 or not isinstance(c_result["data"], dict):
+            return error_page("Company not found.")
+        new_company_name = (c_result["data"].get("name") or "").strip() or "Unknown"
+    else:
+        new_company_name = other_name   # never create a Pipeline company
+
+    new_type_id = BUY_TYPE_ID if side == "buy" else SELL_TYPE_ID
+    existing_open = open_orders_for(new_pid, new_cid, new_type_id) if new_cid else []
+
+    deal_body = {
+        "name": f"{new_company_name}: {side_label}",
+        "primary_contact_id": new_pid,
+        "deal_stage_id": INQUIRY_STAGE_ID,
+        "custom_fields": {DEAL_TYPE_FIELD: [new_type_id], STRUCTURE_FIELD: structure_ids},
+    }
+    if new_cid:
+        deal_body["company_id"] = new_cid
+    if new_owner_id:
+        deal_body["user_id"] = new_owner_id
+
+    create_result = call_pipeline_api("POST", "/deals.json", {"deal": deal_body}, jwt=jwt_new)
+    created = create_result.get("data") if isinstance(create_result.get("data"), dict) else {}
+    if create_result["status"] not in (200, 201) or not created.get("id"):
+        logger.error(f"new-order create failed: {create_result}")
+        return error_page("Sorry — we could not create your order. Please reply to our email and we will set it up for you.")
+    new_deal_id = created["id"]
+
+    try:
+        s3_lock.put_object(
+            Bucket=QA_BUCKET, Key=lock_key,
+            Body=json.dumps({"deal_id": new_deal_id, "created_at": _utcnow().isoformat()}).encode(),
+        )
+    except Exception as e:
+        logger.warning(f"new-order lock write failed: {e}")
+
+    # Chad's notification
+    new_person_name = _person_name(new_person) or f"Person {new_pid}"
+    new_person_email = (new_person.get("email") or "").strip() or "—"
+    new_deal_url = f"https://app.pipelinecrm.com/deals/{new_deal_id}"
+    company_line = new_company_name if new_cid else f"{other_name} (not linked)"
+    facts = [
+        ("Side", side_label),
+        ("Structure", structure_label),
+        ("Company", company_line),
+        ("Person", f"{new_person_name} — {new_person_email}"),
+        ("Arrived via", arrival),
+        ("Deal", f"#{new_deal_id} (Inquiry): {new_deal_url}"),
+    ]
+    alerts, notes = [], []
+    if not new_cid:
+        alerts.append(f"Company not linked — link '{other_name}' in Pipeline")
+    if existing_open:
+        notes.append("Note: they already have open order(s) "
+                     + ", ".join(f"#{i}" for i in existing_open) + " for this company/side")
+    if sso_email:
+        try:
+            sso_matches = find_people_by_email(sso_email, jwt_new)
+        except Exception as e:
+            logger.warning(f"new-order: match listing failed: {e}")
+            sso_matches = []
+        if len(sso_matches) > 1:
+            notes.append(f"{sso_email} matches {len(sso_matches)} Pipeline people (used #{new_pid}): " + "; ".join(
+                f"#{m.get('id')} {_person_name(m) or '—'}"
+                + (" [Whitelist]" if WHITELIST_TAG_ID in _tag_ids(m) else "")
+                + f" updated {m.get('updated_at') or '—'}"
+                for m in sso_matches))
+
+    text_body = "\n".join(
+        [f"New {side_label} order via the New Order form."]
+        + [f"{k}: {v}" for k, v in facts]
+        + ([""] + alerts if alerts else []) + ([""] + notes if notes else [])
+    )
+    rows_html = "".join(
+        f'<tr><td style="padding:4px 12px 4px 0;color:#6b7280;font-size:13px;white-space:nowrap;vertical-align:top;">{k}</td>'
+        f'<td style="padding:4px 0;font-size:13px;">{html.escape(v)}</td></tr>'
+        for k, v in facts[:-1]
+    ) + (f'<tr><td style="padding:4px 12px 4px 0;color:#6b7280;font-size:13px;">Deal</td>'
+         f'<td style="padding:4px 0;font-size:13px;"><a href="{new_deal_url}" style="{EMAIL_LINK_STYLE}">#{new_deal_id}</a> (Inquiry)</td></tr>')
+    send_email(
+        CHAD_EMAIL,
+        f"New {side_label} order via form: {new_company_name} ({new_person_name})",
+        text_body,
+        html=email_html(
+            f'<p style="margin:0 0 12px 0;">New <strong>{side_label}</strong> order via the New Order form.</p>'
+            f'<table style="border-collapse:collapse;margin-bottom:8px;">{rows_html}</table>'
+            + "".join(f'<p style="margin:12px 0 0 0;font-size:13px;color:#b91c1c;font-weight:600;">{html.escape(a)}</p>' for a in alerts)
+            + "".join(f'<p style="margin:12px 0 0 0;font-size:13px;color:#4b5563;">{html.escape(n)}</p>' for n in notes)
+        ),
+    )
+
+    return {
+        "statusCode": 302,
+        "headers": {"Location": f"?deal_id={new_deal_id}&token={make_deal_token(new_deal_id)}"},
+        "body": "",
+    }
 
 
 # ── POST handler ──────────────────────────────────────────────────────────────
@@ -1577,95 +2005,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         return handle_qa_answer_submit(params)
 
     if params.get("submit_action") == "create" and params.get("new_person_id"):
-        # Honeypot: bots that fill the hidden field get a fake success, no write
-        if params.get("website", "").strip():
-            return success_page("Order received")
-        try:
-            new_pid = int(params.get("new_person_id", ""))
-            new_cid = int(params.get("company_id", ""))
-        except (ValueError, TypeError):
-            return error_page("Invalid submission.")
-        if not verify_token(f"new:{new_pid}", params.get("new_token", "")):
-            return error_page("Invalid or expired link.")
-        side = params.get("side", "").strip().lower()
-        if side not in ("buy", "sell"):
-            return error_page("Please choose Buy or Sell.")
-
-        # Duplicate lock: one open order per person/company/side
-        s3_lock = boto3.client("s3")
-        lock_key = f"new-order-locks/{new_pid}-{new_cid}-{side}.json"
-        try:
-            s3_lock.head_object(Bucket="gracia-deal-qa", Key=lock_key)
-            return html_response(
-                '<h1>Already received</h1>'
-                '<p class="subtitle" style="margin-top:12px">We already have this order on file. '
-                'If you would like to change it, just reply to any of our emails and we will '
-                'send you an update link.</p>'
-            )
-        except Exception:
-            pass
-
-        jwt_new = get_jwt()
-        p_result = call_pipeline_api("GET", f"/people/{new_pid}.json", jwt=jwt_new)
-        if p_result["status"] != 200 or not isinstance(p_result["data"], dict):
-            return error_page("Contact not found.")
-        new_person = p_result["data"]
-        new_owner_id = new_person.get("owner_id")
-
-        c_result = call_pipeline_api("GET", f"/companies/{new_cid}.json", jwt=jwt_new)
-        if c_result["status"] != 200 or not isinstance(c_result["data"], dict):
-            return error_page("Company not found.")
-        new_company_name = (c_result["data"].get("name") or "").strip() or "Unknown"
-
-        side_label = "Buy" if side == "buy" else "Sell"
-        new_type_id = BUY_TYPE_ID if side == "buy" else SELL_TYPE_ID
-        create_payload = {"deal": {
-            "name": f"{new_company_name}: {side_label}",
-            "company_id": new_cid,
-            "primary_contact_id": new_pid,
-            "deal_stage_id": INQUIRY_STAGE_ID,
-            "custom_fields": {DEAL_TYPE_FIELD: [new_type_id]},
-        }}
-        if new_owner_id:
-            create_payload["deal"]["user_id"] = new_owner_id
-
-        create_result = call_pipeline_api("POST", "/deals.json", create_payload, jwt=jwt_new)
-        created = create_result.get("data") if isinstance(create_result.get("data"), dict) else {}
-        if create_result["status"] not in (200, 201) or not created.get("id"):
-            logger.error(f"new-order create failed: {create_result}")
-            return error_page("Sorry — we could not create your order. Please reply to our email and we will set it up for you.")
-        new_deal_id = created["id"]
-
-        try:
-            s3_lock.put_object(
-                Bucket="gracia-deal-qa", Key=lock_key,
-                Body=json.dumps({
-                    "deal_id": new_deal_id,
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                }).encode(),
-            )
-        except Exception as e:
-            logger.warning(f"new-order lock write failed: {e}")
-
-        new_person_name = (new_person.get("full_name") or f"{new_person.get('first_name', '')} {new_person.get('last_name', '')}").strip() or f"Person {new_pid}"
-        new_deal_url = f"https://app.pipelinecrm.com/deals/{new_deal_id}"
-        send_email(
-            CHAD_EMAIL,
-            f"New {side_label} order via form: {new_company_name} ({new_person_name})",
-            f"{new_person_name} created a new {side_label} order for {new_company_name}.\n"
-            f"Deal #{new_deal_id} (Inquiry stage): {new_deal_url}",
-            html=email_html(
-                f'<p style="margin:0 0 12px 0;"><strong>{html.escape(new_person_name)}</strong> created a new '
-                f'<strong>{side_label}</strong> order for <strong>{html.escape(new_company_name)}</strong>.</p>'
-                f'<p style="margin:0;font-size:13px;"><a href="{new_deal_url}" style="{EMAIL_LINK_STYLE}">Open deal {new_deal_id}</a></p>'
-            ),
-        )
-
-        return {
-            "statusCode": 302,
-            "headers": {"Location": f"?deal_id={new_deal_id}&token={make_deal_token(new_deal_id)}"},
-            "body": "",
-        }
+        return handle_new_order_create(params)
 
     deal_id_str   = params.get("deal_id", "")
     submit_action = params.get("submit_action", "confirm")
@@ -2919,7 +3259,7 @@ def lambda_handler(event, context):
         if method == "GET":
             if qs.get("qa") == "answer":
                 return handle_qa_answer_page(qs)
-            return handle_get(qs)
+            return handle_get(qs, event)
         elif method == "POST":
             return handle_post(body, qs)
         else:
