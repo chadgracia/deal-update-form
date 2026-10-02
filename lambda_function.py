@@ -153,6 +153,23 @@ BUY_TYPE_ID       = 5077819
 OBSOLETE_STAGE_ID = 2348038
 FIRM_STAGE_ID     = 111800
 INQUIRY_STAGE_ID  = 2109142
+HOLD_STAGE_ID     = 2094373
+
+# Signed-in New Order for an email with no Pipeline person yet: pipeline-agent
+# creates trades sign-ups within a few minutes, so refresh before giving up.
+ACCOUNT_WAIT_TRIES = 12
+ACCOUNT_WAIT_SECS  = 15
+
+# New Order attestation, per side. The exact text shown is stored in S3.
+ATTEST_TEXT = {
+    "buy":  "I confirm I am an accredited investor and the information I provide is accurate.",
+    "sell": "I confirm I own, or am authorized to sell, these securities, and the information I provide is accurate.",
+}
+
+BLOCKBOOK_URL = "https://desk.graciagroup.com/blockbook/"
+SAVED_NOTE    = "Saved. It can take up to an hour to appear on trades and Blockbook."
+ANTHROPIC_SELL_MSG = "Received — we'll review and confirm before listing."
+ANTHROPIC_SELL_LINE = "Anthropic sell: kept on Hold"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -257,6 +274,59 @@ def verify_sso_handoff(token: str):
         return email.strip() or None
     except Exception:
         return None
+
+
+def make_handoff_token(email: str) -> str:
+    """Trades-format sso handoff (same as trades _make_handoff_token): base64url
+    "email|exp|hexsig", sig = HMAC-SHA256(IDENTITY_SECRET, "email|exp"), 1h."""
+    exp = int(_utcnow().timestamp()) + 3600
+    sig = hmac.new(IDENTITY_SECRET.encode(), f"{email}|{exp}".encode(),
+                   hashlib.sha256).hexdigest()
+    return base64.urlsafe_b64encode(f"{email}|{exp}|{sig}".encode()).decode().rstrip("=")
+
+
+def is_anthropic_sell(sell: bool, company_name: str, deal_name: str, linked: bool) -> bool:
+    """Sell deal on Anthropic: linked company name, or the deal name for
+    Other-company (unlinked) deals, contains "anthropic" (any case)."""
+    name = company_name if linked else deal_name
+    return bool(sell) and "anthropic" in (name or "").lower()
+
+
+def _contact_company_id(contact: dict):
+    contact = contact or {}
+    return contact.get("company_id") or (contact.get("company") or {}).get("id")
+
+
+def seller_landing_url(deal_id, email: str, person: dict) -> str:
+    """Blockbook sso link for a seller's success page (trades if no email).
+    &welcome=1 when deals.json has no other Sell Order deal linked to this
+    person or anyone at their company."""
+    if not (email and IDENTITY_SECRET):
+        return TRADES_URL
+    pid = str((person or {}).get("id") or "")
+    pcid = _contact_company_id(person)
+    returning = False
+    try:
+        obj = boto3.client("s3").get_object(Bucket="full-pipeline-cache", Key="deals.json")
+        data = json.loads(obj["Body"].read())
+        deals_list = data if isinstance(data, list) else (data.get("deals") or [])
+    except Exception as e:
+        logger.warning(f"seller landing: deals.json unreadable, treating as first-time: {e}")
+        deals_list = []
+    for d in deals_list:
+        if str(d.get("id")) == str(deal_id):
+            continue
+        types = (d.get("custom_fields") or {}).get(DEAL_TYPE_FIELD)
+        types = types if isinstance(types, list) else [types]
+        if SELL_TYPE_ID not in [int(t) for t in types if str(t).strip().isdigit()]:
+            continue
+        contact = d.get("primary_contact") or {}
+        cpid = d.get("primary_contact_id") or contact.get("id")
+        if (pid and str(cpid) == pid) or (pcid and str(_contact_company_id(contact)) == str(pcid)):
+            returning = True
+            break
+    url = f"{BLOCKBOOK_URL}?sso={urllib.parse.quote(make_handoff_token(email), safe='')}"
+    return url if returning else url + "&welcome=1"
 
 
 def make_identity_cookie(email: str) -> str:
@@ -540,7 +610,7 @@ def fmt_input(val):
         return str(val)
 
 
-def html_response(body_html: str, status: int = 200) -> dict:
+def html_response(body_html: str, status: int = 200, head_extra: str = "") -> dict:
     return {
         "statusCode": status,
         "headers": {"Content-Type": "text/html; charset=utf-8"},
@@ -743,6 +813,7 @@ def html_response(body_html: str, status: int = 200) -> dict:
       .modal-btn {{ width: 100%; }}
     }}
   </style>
+  {head_extra}
 </head>
 <body>
   <div class="card">
@@ -1591,24 +1662,32 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
 
 # ── Success page ──────────────────────────────────────────────────────────────
 
-def success_page(message: str, subtitle: str = None) -> dict:
+def success_page(message: str, subtitle: str = None, dest: str = None) -> dict:
+    """dest: a Blockbook sso link for sellers; None keeps the trades redirect."""
     subtitle = subtitle or "Your update has been received. We'll be in touch if we need anything else."
-    html = f"""
+    url = dest or TRADES_URL
+    to_blockbook = url.startswith(BLOCKBOOK_URL)
+    button = (f'<div class="actions" style="margin-top:16px"><a href="{html.escape(url)}" class="btn-primary" '
+              f'style="display:inline-block;text-decoration:none;text-align:center;">Go to Blockbook →</a></div>'
+              if to_blockbook else "")
+    html_body = f"""
     <div class="success-icon">✓</div>
     <h1 style="text-align:center">{message}</h1>
     <p class="subtitle" style="text-align:center;margin-top:8px">{subtitle}</p>
-    <div class="countdown" id="cd">Redirecting to the marketplace in <span id="n">3</span> seconds…</div>
+    <p class="subtitle" style="text-align:center;margin-top:8px">{SAVED_NOTE}</p>
+    {button}
+    <div class="countdown" id="cd">Redirecting to {"Blockbook" if to_blockbook else "the marketplace"} in <span id="n">3</span> seconds…</div>
     <script>
       var n = 3;
       var el = document.getElementById('n');
       var iv = setInterval(function() {{
         n--;
         el.textContent = n;
-        if (n <= 0) {{ clearInterval(iv); window.location.href = '{TRADES_URL}'; }}
+        if (n <= 0) {{ clearInterval(iv); window.location.href = {json.dumps(url)}; }}
       }}, 1000);
     </script>
     """
-    return html_response(html)
+    return html_response(html_body)
 
 
 # ── New Order pages ───────────────────────────────────────────────────────────
@@ -1680,6 +1759,11 @@ def render_new_order_page(pid: int, first_name: str, token: str, sso_email: str 
         </div>
       </div>
 
+      <div class="field" id="attest-wrap">
+        <label id="attest-buy" style="font-weight:normal;display:block;margin-top:6px;"><input type="checkbox" name="attest_buy" value="1"> {html.escape(ATTEST_TEXT["buy"])}</label>
+        <label id="attest-sell" style="font-weight:normal;display:block;margin-top:6px;"><input type="checkbox" name="attest_sell" value="1"> {html.escape(ATTEST_TEXT["sell"])}</label>
+      </div>
+
       <div class="actions">
         <button type="submit" name="submit_action" value="create" class="btn-primary">Continue →</button>
       </div>
@@ -1698,6 +1782,13 @@ def render_new_order_page(pid: int, first_name: str, token: str, sso_email: str 
           var box = document.getElementById('st-' + k), show = (side === k);
           box.style.display = show ? '' : 'none';
           box.querySelectorAll('input').forEach(function(i) {{ i.disabled = !show; if (!show) i.checked = false; }});
+        }});
+        document.getElementById('attest-wrap').style.display = side ? '' : 'none';
+        ['sell', 'buy'].forEach(function(k) {{
+          var lab = document.getElementById('attest-' + k), cb = lab.querySelector('input'), show = (side === k);
+          lab.style.display = show ? '' : 'none';
+          cb.disabled = !show; cb.required = show;
+          if (!show) cb.checked = false;
         }});
         var other = (f.company_id.value === 'other'), box = document.getElementById('co-other');
         box.style.display = other ? '' : 'none';
@@ -1754,7 +1845,18 @@ def unknown_signin_page(email: str) -> dict:
     )
 
 
-def new_order_for_email(email: str) -> dict:
+def account_setup_page(wait: int) -> dict:
+    """No Pipeline person yet: refresh every ACCOUNT_WAIT_SECS carrying the
+    try count. Sign-in rides on the gg_id cookie; nothing is emailed here."""
+    resp = html_response(
+        '<h1>Almost there</h1>'
+        '<p class="subtitle" style="margin-top:12px">Your account is being set up — this usually takes a minute.</p>',
+        head_extra=f'<meta http-equiv="refresh" content="{ACCOUNT_WAIT_SECS};url=?action=new&amp;wait={wait + 1}">')
+    resp["headers"]["Cache-Control"] = "no-store"
+    return resp
+
+
+def new_order_for_email(email: str, wait: int = 0) -> dict:
     """New Order page for a verified sign-in email (sso or gg_id)."""
     if not FORM_HMAC_SECRET:
         logger.error("new-order: FORM_HMAC_SECRET unset; signed-in New Order disabled")
@@ -1762,6 +1864,8 @@ def new_order_for_email(email: str) -> dict:
     jwt = get_jwt()
     matches = find_people_by_email(email, jwt)
     if not matches:
+        if wait < ACCOUNT_WAIT_TRIES:
+            return account_setup_page(wait)
         return unknown_signin_page(email)
     person = pick_person(matches)
     return render_new_order_page(int(person["id"]), (person.get("first_name") or "").strip(),
@@ -1823,9 +1927,13 @@ def handle_get(params: dict, event: dict = None) -> dict:
         # A valid sso renders the page directly (no redirect, so it works even
         # if the cookie never comes back through CloudFront), sets gg_id for
         # later visits, and strips sso from the address bar client-side.
+        try:
+            wait = max(0, int(params.get("wait", "0")))
+        except (ValueError, TypeError):
+            wait = 0
         sso_email = verify_sso_handoff(params.get("sso", ""))
         if sso_email:
-            resp = new_order_for_email(sso_email)
+            resp = new_order_for_email(sso_email, wait)
             resp["cookies"] = resp.get("cookies", []) + [make_identity_cookie(sso_email)]
             resp["body"] = resp["body"].replace(
                 "</body>",
@@ -1834,7 +1942,7 @@ def handle_get(params: dict, event: dict = None) -> dict:
         email = read_identity_email(event)
         if not email:
             return sign_in_page()
-        return new_order_for_email(email)
+        return new_order_for_email(email, wait)
 
     deal_id_str = params.get("deal_id", "")
     token       = params.get("token", "")
@@ -1881,7 +1989,7 @@ def handle_get(params: dict, event: dict = None) -> dict:
 
 # ── New Order create (POST) ──────────────────────────────────────────────────
 
-def handle_new_order_create(params: dict) -> dict:
+def handle_new_order_create(params: dict, event: dict = None) -> dict:
     # Honeypot: bots that fill the hidden field get a fake success, no write
     if params.get("website", "").strip():
         return success_page("Order received")
@@ -1905,6 +2013,8 @@ def handle_new_order_create(params: dict) -> dict:
         names = " / ".join(label for label, _ in structure_opts.values())
         return error_page(f"Please choose a structure for your {side_label.lower()} order ({names}).")
     structure_label, structure_ids = structure_choice
+    if params.get(f"attest_{side}", "") != "1":
+        return error_page("Please tick the confirmation box to continue.")
 
     new_cid, other_name = None, ""
     if params.get("company_id", "").strip() == "other":
@@ -1948,11 +2058,14 @@ def handle_new_order_create(params: dict) -> dict:
 
     new_type_id = BUY_TYPE_ID if side == "buy" else SELL_TYPE_ID
     existing_open = open_orders_for(new_pid, new_cid, new_type_id) if new_cid else []
+    new_deal_name = f"{new_company_name}: {side_label}"
+    anthropic_hold = is_anthropic_sell(side == "sell", new_company_name, new_deal_name, bool(new_cid))
+    new_stage_label = "Hold" if anthropic_hold else "Inquiry"
 
     deal_body = {
-        "name": f"{new_company_name}: {side_label}",
+        "name": new_deal_name,
         "primary_contact_id": new_pid,
-        "deal_stage_id": INQUIRY_STAGE_ID,
+        "deal_stage_id": HOLD_STAGE_ID if anthropic_hold else INQUIRY_STAGE_ID,
         "custom_fields": {DEAL_TYPE_FIELD: [new_type_id], STRUCTURE_FIELD: structure_ids},
     }
     if new_cid:
@@ -1975,6 +2088,27 @@ def handle_new_order_create(params: dict) -> dict:
     except Exception as e:
         logger.warning(f"new-order lock write failed: {e}")
 
+    # Attestation record: append-only (never overwrites an existing key).
+    attested_at = _utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    attest_saved = True
+    try:
+        s3_lock.put_object(
+            Bucket=QA_BUCKET, Key=f"attestations/{new_deal_id}.json", IfNoneMatch="*",
+            ContentType="application/json",
+            Body=json.dumps({
+                "deal_id": new_deal_id,
+                "person_id": new_pid,
+                "email": sso_email or (new_person.get("email") or "").strip(),
+                "side": side,
+                "text": ATTEST_TEXT[side],
+                "attested_at": attested_at,
+                "source_ip": ((event or {}).get("requestContext") or {}).get("http", {}).get("sourceIp", ""),
+            }).encode(),
+        )
+    except Exception as e:
+        attest_saved = False
+        logger.error(f"new-order: attestation record write failed for deal {new_deal_id}: {e}")
+
     # Chad's notification
     new_person_name = _person_name(new_person) or f"Person {new_pid}"
     new_person_email = (new_person.get("email") or "").strip() or "—"
@@ -1986,9 +2120,13 @@ def handle_new_order_create(params: dict) -> dict:
         ("Company", company_line),
         ("Person", f"{new_person_name} — {new_person_email}"),
         ("Arrived via", arrival),
-        ("Deal", f"#{new_deal_id} (Inquiry): {new_deal_url}"),
+        ("Deal", f"#{new_deal_id} ({new_stage_label}): {new_deal_url}"),
     ]
-    alerts, notes = [], []
+    alerts, notes = [], [f"Attestation checked {attested_at}"]
+    if not attest_saved:
+        alerts.append(f"Attestation record NOT saved to s3://{QA_BUCKET}/attestations/{new_deal_id}.json")
+    if anthropic_hold:
+        alerts.append(ANTHROPIC_SELL_LINE)
     if not new_cid:
         alerts.append(f"Company not linked — link '{other_name}' in Pipeline")
     if existing_open:
@@ -2017,7 +2155,7 @@ def handle_new_order_create(params: dict) -> dict:
         f'<td style="padding:4px 0;font-size:13px;">{html.escape(v)}</td></tr>'
         for k, v in facts[:-1]
     ) + (f'<tr><td style="padding:4px 12px 4px 0;color:#6b7280;font-size:13px;">Deal</td>'
-         f'<td style="padding:4px 0;font-size:13px;"><a href="{new_deal_url}" style="{EMAIL_LINK_STYLE}">#{new_deal_id}</a> (Inquiry)</td></tr>')
+         f'<td style="padding:4px 0;font-size:13px;"><a href="{new_deal_url}" style="{EMAIL_LINK_STYLE}">#{new_deal_id}</a> ({new_stage_label})</td></tr>')
     send_email(
         CHAD_EMAIL,
         f"New {side_label} order via form: {new_company_name} ({new_person_name})",
@@ -2039,7 +2177,7 @@ def handle_new_order_create(params: dict) -> dict:
 
 # ── POST handler ──────────────────────────────────────────────────────────────
 
-def handle_post(body_str: str, qs: dict = None) -> dict:
+def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
     params = {}
     for part in body_str.split("&"):
         if "=" in part:
@@ -2063,7 +2201,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         return handle_qa_answer_submit(params)
 
     if params.get("submit_action") == "create" and params.get("new_person_id"):
-        return handle_new_order_create(params)
+        return handle_new_order_create(params, event)
 
     deal_id_str   = params.get("deal_id", "")
     submit_action = params.get("submit_action", "confirm")
@@ -2248,6 +2386,9 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         is_firm  = has_shares and has_price and has_structure
     new_stage      = FIRM_STAGE_ID if is_firm else INQUIRY_STAGE_ID
     new_stage_name = "Firm" if new_stage == FIRM_STAGE_ID else "Inquiry"
+    anthropic_hold = is_anthropic_sell(sell, company, current_deal.get("name", ""), bool(company_id))
+    if anthropic_hold:
+        new_stage, new_stage_name = HOLD_STAGE_ID, "Hold"
 
     # Build Pipeline update payload
     custom = {REFRESH_FIELD: 60}
@@ -2362,6 +2503,7 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
 
     contact_id = (current_deal.get("primary_contact") or {}).get("id", 0)
     contact_email = ""
+    person = {}
     if contact_id:
         p = call_pipeline_api("GET", f"/people/{contact_id}.json", jwt=jwt)
         if p["status"] == 200:
@@ -2568,6 +2710,8 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         email_lines.append(f"(gross = net × {1 + commission_rate:g} ({commission_rate * 100:g}% tier) = ${est_gross_sell:,.2f}/share est.)")
     if gross_clear_failed:
         email_lines += ["", GROSS_CLEAR_FAIL_MSG]
+    if anthropic_hold:
+        email_lines += ["", ANTHROPIC_SELL_LINE]
     if comments:
         email_lines += ["", f"Client note (may need a public-notes update): {comments}"]
     email_lines += ["", "Refresh reset to 60 days."]
@@ -2633,6 +2777,11 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
             '<p style="margin:16px 0 0 0;font-size:13px;color:#b91c1c;font-weight:600;">'
             f'{GROSS_CLEAR_FAIL_MSG}</p>'
         )
+    if anthropic_hold:
+        comments_html += (
+            '<p style="margin:16px 0 0 0;font-size:13px;color:#b91c1c;font-weight:600;">'
+            f'{ANTHROPIC_SELL_LINE}</p>'
+        )
     if comments:
         comments_html += (
             '<p style="margin:16px 0 0 0;font-size:13px;color:#4b5563;">'
@@ -2654,7 +2803,8 @@ def handle_post(body_str: str, qs: dict = None) -> dict:
         html=email_html(inner_html),
     )
 
-    return success_page("Update received!")
+    dest = seller_landing_url(deal_id, contact_email.strip(), person if isinstance(person, dict) else {}) if sell else None
+    return success_page("Update received!", subtitle=ANTHROPIC_SELL_MSG if anthropic_hold else None, dest=dest)
 
 
 def handle_weekly_signup(params: dict) -> dict:
@@ -3319,7 +3469,7 @@ def lambda_handler(event, context):
                 return handle_qa_answer_page(qs)
             return handle_get(qs, event)
         elif method == "POST":
-            return handle_post(body, qs)
+            return handle_post(body, qs, event)
         else:
             return error_page("Method not allowed.")
     except Exception as e:
