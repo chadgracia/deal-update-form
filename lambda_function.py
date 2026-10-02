@@ -39,7 +39,12 @@ FORM_HMAC_SECRET    = os.environ.get("FORM_HMAC_SECRET", "")
 # gg_id sign-in cookie key, shared with trades / CRMDealDetails / syndicate-dash.
 # Read from env only -- never committed. Unset -> nobody counts as signed in.
 IDENTITY_SECRET     = os.environ.get("IDENTITY_SECRET", "")
-SIGN_IN_URL         = "https://trades.graciagroup.com/?login=1"
+# Sign-in goes straight to trades' Cognito hosted UI (same URL trades
+# _nav_login_url builds); trades sends them back with &sso= appended.
+COGNITO_HOSTED_UI    = "https://us-east-1dsttcaqx7.auth.us-east-1.amazoncognito.com"
+COGNITO_CLIENT_ID    = "71vrglkidm13jb73u7nje3d1t2"
+COGNITO_REDIRECT_URI = "https://trades.graciagroup.com"
+NEW_ORDER_URL        = "https://desk.graciagroup.com/update/?action=new"
 WHITELIST_TAG_ID    = 3280123
 SES_SENDER          = "agent@agent.graciagroup.com"
 AGENT_EMAIL         = "agent@agent.graciagroup.com"
@@ -225,6 +230,40 @@ def _get_cookie(event, name):
         if c.startswith(name + "="):
             return c.split("=", 1)[1]
     return None
+
+
+def cognito_url(path: str = "login", dest: str = NEW_ORDER_URL) -> str:
+    """Cognito hosted-UI URL (login or signup) carrying dest as base64url state."""
+    state = base64.urlsafe_b64encode(dest.encode()).decode().rstrip("=")
+    return (f"{COGNITO_HOSTED_UI}/{path}"
+            f"?client_id={COGNITO_CLIENT_ID}&response_type=code&scope=openid+email"
+            f"&redirect_uri={COGNITO_REDIRECT_URI}"
+            f"&state={urllib.parse.quote(state, safe='')}")
+
+
+def verify_sso_handoff(token: str):
+    """Email from trades' _make_handoff_token (base64url "email|exp|hexsig",
+    sig = HMAC-SHA256(IDENTITY_SECRET, "email|exp")) if the sig matches and
+    exp is in the future, else None. Never raises."""
+    if not (IDENTITY_SECRET and token):
+        return None
+    try:
+        decoded = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode()
+        email, exp, sig = decoded.rsplit("|", 2)
+        expected = hmac.new(IDENTITY_SECRET.encode(), f"{email}|{exp}".encode(),
+                            hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, sig) or int(exp) <= _utcnow().timestamp():
+            return None
+        return email.strip() or None
+    except Exception:
+        return None
+
+
+def make_identity_cookie(email: str) -> str:
+    """gg_id cookie, same format as trades _make_identity_cookie."""
+    sig = hmac.new(IDENTITY_SECRET.encode(), email.encode(), hashlib.sha256).hexdigest()
+    val = base64.urlsafe_b64encode(f"{email}|{sig}".encode()).decode().rstrip("=")
+    return f"gg_id={val}; Max-Age=31536000; Domain=.graciagroup.com; Path=/; Secure; SameSite=Lax"
 
 
 def read_identity_email(event):
@@ -1675,10 +1714,13 @@ def render_new_order_page(pid: int, first_name: str, token: str, sso_email: str 
 def sign_in_page() -> dict:
     return html_response(f"""
     <h1>New Order</h1>
-    <p class="subtitle" style="margin-top:12px">Sign in to add a buy or sell order.</p>
+    <p class="subtitle" style="margin-top:12px">Sign in to add buy or sell orders, and to see full deal details, your portfolio and watchlist.</p>
     <div class="actions" style="margin-top:20px">
-      <a href="{SIGN_IN_URL}" class="btn-primary" style="display:inline-block;text-decoration:none;text-align:center;">Sign in to add an order</a>
+      <a href="{html.escape(cognito_url('login'))}" class="btn-primary" style="display:inline-block;text-decoration:none;text-align:center;">Sign in for full access</a>
     </div>
+    <p style="text-align:center;font-size:13px;margin-top:14px;">
+      <a href="{html.escape(cognito_url('signup'))}" style="color:#2563eb;text-decoration:none;">New here? Create an account</a>
+    </p>
     """)
 
 
@@ -1710,6 +1752,20 @@ def unknown_signin_page(email: str) -> dict:
         '<h1>Thanks</h1>'
         '<p class="subtitle" style="margin-top:12px">Thanks — we\'ll set this up for you and follow up shortly.</p>'
     )
+
+
+def new_order_for_email(email: str) -> dict:
+    """New Order page for a verified sign-in email (sso or gg_id)."""
+    if not FORM_HMAC_SECRET:
+        logger.error("new-order: FORM_HMAC_SECRET unset; signed-in New Order disabled")
+        return error_page("New orders are temporarily unavailable. Please reply to any of our emails and we'll set it up.")
+    jwt = get_jwt()
+    matches = find_people_by_email(email, jwt)
+    if not matches:
+        return unknown_signin_page(email)
+    person = pick_person(matches)
+    return render_new_order_page(int(person["id"]), (person.get("first_name") or "").strip(),
+                                 make_new_token(int(person["id"]), email), email.lower())
 
 
 # ── GET handler ───────────────────────────────────────────────────────────────
@@ -1763,20 +1819,22 @@ def handle_get(params: dict, event: dict = None) -> dict:
             first_name = (p_result["data"].get("first_name") or "").strip()
             return render_new_order_page(pid, first_name, make_new_token(pid))
 
-        # No token: signed in on trades via the gg_id cookie?
+        # No token: trades' sso handoff first, then the gg_id cookie.
+        # A valid sso renders the page directly (no redirect, so it works even
+        # if the cookie never comes back through CloudFront), sets gg_id for
+        # later visits, and strips sso from the address bar client-side.
+        sso_email = verify_sso_handoff(params.get("sso", ""))
+        if sso_email:
+            resp = new_order_for_email(sso_email)
+            resp["cookies"] = resp.get("cookies", []) + [make_identity_cookie(sso_email)]
+            resp["body"] = resp["body"].replace(
+                "</body>",
+                "<script>try{history.replaceState(null,'',location.pathname+'?action=new');}catch(e){}</script></body>", 1)
+            return resp
         email = read_identity_email(event)
         if not email:
             return sign_in_page()
-        if not FORM_HMAC_SECRET:
-            logger.error("new-order: FORM_HMAC_SECRET unset; signed-in New Order disabled")
-            return error_page("New orders are temporarily unavailable. Please reply to any of our emails and we'll set it up.")
-        jwt = get_jwt()
-        matches = find_people_by_email(email, jwt)
-        if not matches:
-            return unknown_signin_page(email)
-        person = pick_person(matches)
-        return render_new_order_page(int(person["id"]), (person.get("first_name") or "").strip(),
-                                     make_new_token(int(person["id"]), email), email.lower())
+        return new_order_for_email(email)
 
     deal_id_str = params.get("deal_id", "")
     token       = params.get("token", "")
