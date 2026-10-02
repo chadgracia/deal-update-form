@@ -1840,8 +1840,13 @@ def unknown_signin_page(email: str) -> dict:
             ),
         )
     return html_response(
-        '<h1>Thanks</h1>'
-        '<p class="subtitle" style="margin-top:12px">Thanks — we\'ll set this up for you and follow up shortly.</p>'
+        '<h1>Thanks — we\'ll be in touch shortly</h1>'
+        '<p class="subtitle" style="margin-top:12px">We\'ll confirm your account and follow up by email. '
+        'In the meantime, explore what\'s trading now.</p>'
+        '<div class="actions" style="margin-top:20px">'
+        '<a href="https://trades.graciagroup.com/" class="btn-primary" '
+        'style="display:inline-block;text-decoration:none;text-align:center;">Go to trades →</a></div>',
+        head_extra='<meta http-equiv="refresh" content="5;url=https://trades.graciagroup.com/">'
     )
 
 
