@@ -109,6 +109,11 @@ CARRY_FIELD       = "custom_label_3940559"
 LAYERS_FIELD      = "custom_label_3938743"
 FUND_EXEMPT_FIELD = "custom_label_4006089"
 SELLER_ROLE_FIELD = "custom_label_3938748"
+SR_NEW_ALLOCATION_ID = 7020357   # Seller Role: GP — syndicating new allocation
+NEXUS_FIELD       = "custom_label_3751449"
+NEXUS_DIRECT_ID   = 6460632
+CP_DIRECT_FIELD   = "custom_label_3065662"
+CP_DIRECT_YES_ID  = 5080984
 DEADLINE_FIELD    = "custom_label_4006402"
 SELLER_FEE_FIELD  = "custom_label_3940560"
 EST_VAL_FIELD     = "custom_label_4009563"  # stored in billions, like COMPANY_VAL_FIELD
@@ -549,6 +554,54 @@ def est_val_dollars(stored):
     return f * 1e9 if f > 0 else None
 
 
+def est_val_is_unknown(stored) -> bool:
+    """A stored EST_VAL_FIELD of exactly 0 means the seller ticked Unknown."""
+    if stored in (None, ""):
+        return False
+    try:
+        return float(str(stored).replace(",", "")) == 0
+    except (ValueError, TypeError):
+        return False
+
+
+def seller_role_id(raw):
+    if raw in (None, ""):
+        return None
+    try:
+        return int(float(str(raw)))
+    except (ValueError, TypeError):
+        return None
+
+
+def est_val_label(role) -> str:
+    return "Round valuation (pre-money)" if seller_role_id(role) == SR_NEW_ALLOCATION_ID else "Est. valuation"
+
+
+def fmt_est_val_display(stored) -> str:
+    """Summary/email display of a stored EST_VAL_FIELD (billions)."""
+    if est_val_is_unknown(stored):
+        return "Not provided or unknown"
+    return fmt_valuation(est_val_dollars(stored)) or "—"
+
+
+def last_round_basis(company_rec):
+    """(last-round valuation $, last-round PPS) when BOTH are positive, else None."""
+    ccf = (company_rec or {}).get("custom_fields", {}) or {}
+    try:
+        lr_val = float(str(parse_cf(ccf, COMPANY_VAL_FIELD)).replace(",", "")) * 1e9
+        lr_pps = float(str(parse_cf(ccf, COMPANY_PPS_FIELD)).replace(",", ""))
+    except (ValueError, TypeError):
+        return None
+    return (lr_val, lr_pps) if lr_val > 0 and lr_pps > 0 else None
+
+
+def fmt_implied_val(dollars) -> str:
+    """>= $1B -> "~$5.2B" (trailing zeros trimmed); below -> "~$750M"."""
+    if dollars >= 1e9:
+        return "~$" + f"{dollars / 1e9:.1f}".rstrip("0").rstrip(".") + "B"
+    return f"~${round(dollars / 1e6):,.0f}M"
+
+
 def fmt_valuation(val):
     """Dollars -> "$5B" / "$750M" / "$1.25B". Empty string when missing."""
     if val in (None, ""):
@@ -826,6 +879,9 @@ def html_response(body_html: str, status: int = 200, head_extra: str = "") -> di
 
 
 PRICE_OR_VAL_MSG = "Enter either a net price or an estimated valuation."
+ROUND_VAL_MSG = "Enter the round valuation (pre-money), e.g. 150M or 1.5B."
+VAL_OR_UNKNOWN_MSG = "Enter the estimated valuation, or tick Unknown."
+ROUND_VAL_HINT = "The valuation of the round you&rsquo;re syndicating, before the new money."
 EST_VAL_SMALL_MSG = "Enter the full company valuation, e.g. 150,000,000 or 150M"
 
 
@@ -835,8 +891,24 @@ def error_page(msg: str) -> dict:
 
 # ── Form page ─────────────────────────────────────────────────────────────────
 
-def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list = None, new_url: str = "") -> dict:
-    cf           = deal.get("custom_fields", {})
+# Posted form field -> deal custom field, for re-rendering a rejected submit with entries kept.
+_POSTED_CF = {"net": NET_FIELD, "gross": GROSS_FIELD, "share_count": SHARE_COUNT_FIELD,
+              "share_class": SHARE_CLASS_FIELD, "series": SERIES_FIELD, "min_size": MIN_SIZE_FIELD,
+              "max_size": MAX_SIZE_FIELD, "layers": LAYERS_FIELD, "fund_exemption": FUND_EXEMPT_FIELD,
+              "seller_role": SELLER_ROLE_FIELD, "deadline": DEADLINE_FIELD, "seller_fee": SELLER_FEE_FIELD,
+              "mgmt_fee": MGMT_FEE_FIELD, "carry": CARRY_FIELD}
+
+
+def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list = None, new_url: str = "",
+                form_error: str = "", posted: dict = None) -> dict:
+    cf           = dict(deal.get("custom_fields", {}) or {})
+    if posted:
+        for _pname, _fld in _POSTED_CF.items():
+            if _pname in posted:
+                cf[_fld] = posted.get(_pname, "").strip()
+        _dr = posted.get("data_room", "").strip().lower()
+        if _dr in ("yes", "no"):
+            cf[DATA_ROOM_FIELD] = DATA_ROOM_YES_ID if _dr == "yes" else DATA_ROOM_NO_ID
     sell         = is_sell(cf)
     side         = "Sell" if sell else "Buy"
     company      = (deal.get("company") or {}).get("name", "")
@@ -1092,6 +1164,37 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
           {"".join(rows)}
         </div>'''
 
+    # SPV sell orders: valuation field (rules depend on Seller Role), placed after Seller Role.
+    need_price_or_val = is_spv and sell
+    lr_basis = last_round_basis(company_rec) if need_price_or_val else None
+    est_val_block = ""
+    implied_html = ""
+    if need_price_or_val:
+        _ev_raw_stored = parse_cf(cf, EST_VAL_FIELD)
+        _ev_stored = est_val_dollars(_ev_raw_stored)
+        est_val_cur = f"${int(round(_ev_stored)):,}" if _ev_stored else ""
+        est_val_unk = est_val_is_unknown(_ev_raw_stored)
+        if posted is not None:
+            est_val_cur = html.escape(posted.get("est_valuation", "").strip(), quote=True) if "est_valuation" in posted else est_val_cur
+            if "est_valuation" in posted or "est_val_unknown" in posted:
+                est_val_unk = posted.get("est_val_unknown", "") == "1"
+        if est_val_unk:
+            est_val_cur = ""
+        _grey = "font-size:12px;color:#888;margin:0 0 6px 0;"
+        est_val_block = f'''
+        <div class="field" id="estValField" style="margin-bottom:0;flex-basis:100%">
+          <label><span id="estValLabel">Est. Valuation</span> <span style="color:#b91c1c">*</span></label>
+          <p id="estValGpHint" style="{_grey}display:none">{ROUND_VAL_HINT}</p>
+          <p id="estValNoLrHint" style="{_grey}display:none">We don&rsquo;t have a last-round valuation for {html.escape(company)}. If you know the valuation that corresponds to your price, enter it.</p>
+          <input type="text" name="est_valuation" value="{est_val_cur}" placeholder="e.g. 150,000,000 or 150M" autocomplete="off">
+          <label id="estValUnknownWrap" style="display:flex;align-items:center;gap:6px;font-weight:400;font-size:13px;margin:6px 0 0 0;cursor:pointer">
+            <input type="checkbox" name="est_val_unknown" value="1"{" checked" if est_val_unk else ""} style="width:auto;margin:0"> Unknown</label>
+          <p id="estValReadout" style="font-size:13px;color:#1a4a8a;font-weight:600;margin:4px 0 0 0;min-height:1em"></p>
+          <p id="estValWarn" style="display:none;font-size:13px;color:#b91c1c;font-weight:600;margin:4px 0 0 0;">{EST_VAL_SMALL_MSG}</p>
+          <p id="priceOrValErr" style="display:none;font-size:13px;color:#b91c1c;font-weight:600;margin:6px 0 0 0;">{PRICE_OR_VAL_MSG}</p>
+        </div>'''
+        implied_html = '\n        <p id="impliedVal" style="display:none;font-size:13px;color:#1a4a8a;font-weight:600;margin:4px 0 0 0;"></p>'
+
     spv_fields_html = ""
     if is_spv:
         data_room_field_html = ""
@@ -1111,6 +1214,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
                 'border:1px solid #ccc;border-radius:6px;font-size:14px;background:#fff">'
                 + sr_options_html +
                 "</select></div>"
+                + est_val_block +
                 '<div class="field" style="margin-bottom:0">'
                 '<label>Deadline to Commit <span style="color:#b91c1c">*</span></label>'
                 '<input type="date" name="deadline" value="' + deadline_val + '" required>'
@@ -1432,9 +1536,6 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         except (ValueError, TypeError):
             pass
 
-    # SPV sell orders: Est. Valuation input; seller must give net price OR valuation.
-    need_price_or_val = is_spv and sell
-    est_val_html = ""
     price_or_val_script = ""
     share_count_html = f'''
         <div class="field" style="margin-bottom:0">
@@ -1445,17 +1546,6 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
     series_script = ""
     if need_price_or_val:
         share_count_html = ""  # SPV sells don't collect share count; stored value is left alone
-        _ev_stored = est_val_dollars(parse_cf(cf, EST_VAL_FIELD))
-        est_val_cur = f"${int(round(_ev_stored)):,}" if _ev_stored else ""
-        est_val_html = f'''
-      <div class="field">
-        <label>Est. Valuation (Required if no Net Price)</label>
-        <input type="text" name="est_valuation" value="{est_val_cur}" placeholder="e.g. 150,000,000 or 150M" autocomplete="off">
-        <p id="estValReadout" style="font-size:13px;color:#1a4a8a;font-weight:600;margin:4px 0 0 0;min-height:1em"></p>
-        <p id="estValWarn" style="display:none;font-size:13px;color:#b91c1c;font-weight:600;margin:4px 0 0 0;">{EST_VAL_SMALL_MSG}</p>
-        <p style="font-size:12px;color:#888;margin:4px 0 0 0;">New allocation? Leave the price blank and enter the estimated company valuation instead.</p>
-        <p id="priceOrValErr" style="display:none;font-size:13px;color:#b91c1c;font-weight:600;margin:6px 0 0 0;">{PRICE_OR_VAL_MSG}</p>
-      </div>'''
         _ser_raw = parse_cf(cf, SERIES_FIELD)
         try:
             _ser_cur = int(float(str(_ser_raw))) if _ser_raw not in (None, "") else None
@@ -1497,6 +1587,17 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
       var err = document.getElementById('priceOrValErr');
       var out = document.getElementById('estValReadout');
       var warn = document.getElementById('estValWarn');
+      var role = form.querySelector('[name="seller_role"]');
+      var unk = form.querySelector('[name="est_val_unknown"]');
+      var box = document.getElementById('estValField');
+      var lbl = document.getElementById('estValLabel');
+      var gpHint = document.getElementById('estValGpHint');
+      var noLrHint = document.getElementById('estValNoLrHint');
+      var unkWrap = document.getElementById('estValUnknownWrap');
+      var implied = document.getElementById('impliedVal');
+      var GP = '{SR_NEW_ALLOCATION_ID}';
+      var LRV = {json.dumps(lr_basis[0] if lr_basis else None)}, LRP = {json.dumps(lr_basis[1] if lr_basis else None)};
+      var MSG = {{priceOrVal: {json.dumps(PRICE_OR_VAL_MSG)}, round: {json.dumps(ROUND_VAL_MSG)}, valOrUnk: {json.dumps(VAL_OR_UNKNOWN_MSG)}}};
       var SUF = {{'': 1, k: 1e3, thousand: 1e3, m: 1e6, mm: 1e6, mn: 1e6, mil: 1e6, million: 1e6,
                  b: 1e9, bn: 1e9, bil: 1e9, billion: 1e9, t: 1e12, tn: 1e12, trillion: 1e12}};
       function blank(el) {{ return !el || !el.value.trim(); }}
@@ -1546,26 +1647,68 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         var n = parseVal(v ? v.value : '');
         return n !== null && n < 1e6;
       }}
+      // Mirrors fmt_implied_val: >= $1B "~$5.2B", below "~$750M".
+      function fmtImplied(f) {{
+        if (f >= 1e9) return '~$' + (Math.round(f / 1e8) / 10) + 'B';
+        return '~$' + Math.round(f / 1e6).toLocaleString('en-US') + 'M';
+      }}
+      function isGp() {{ return !!role && role.value === GP; }}
+      function netNum() {{ var n = parseFloat(p ? p.value : ''); return n > 0 ? n : null; }}
+      function valHidden() {{ return !isGp() && LRV !== null && netNum() !== null; }}
+      function unkOn() {{ return !!unk && unk.checked && !unk.disabled; }}
+      function valNum() {{ var n = parseVal(v && !v.disabled ? v.value : ''); return n !== null && n >= 1e6 ? n : null; }}
+      // Seller Role / price drive the label, hints, Unknown box and implied line.
+      // A hidden field is disabled (not posted), so its stored value is never cleared.
+      function sync() {{
+        if (!v) return;
+        var gp = isGp(), hide = valHidden();
+        if (box) box.style.display = hide ? 'none' : '';
+        if (lbl) lbl.textContent = gp ? 'Round Valuation (pre-money)' : 'Est. Valuation';
+        if (gpHint) gpHint.style.display = gp ? '' : 'none';
+        if (noLrHint) noLrHint.style.display = (!gp && LRV === null) ? '' : 'none';
+        if (unkWrap) unkWrap.style.display = gp ? 'none' : 'flex';
+        if (unk) unk.disabled = hide || gp;
+        v.disabled = hide || unkOn();
+        if (implied) {{
+          implied.style.display = hide ? 'block' : 'none';
+          implied.textContent = hide ? 'Implied valuation at your price: ' + fmtImplied(LRV * (netNum() / LRP)) : '';
+        }}
+      }}
       function update() {{
         if (!v) return;
         var n = parseVal(v.value);
-        if (out) out.textContent = n ? '= ' + fmtVal(n) : '';
-        if (warn) warn.style.display = tooSmall() ? 'block' : 'none';
-        if (err && !(blank(p) && blank(v))) err.style.display = 'none';
+        if (out) out.textContent = (n && !v.disabled) ? '= ' + fmtVal(n) : '';
+        if (warn) warn.style.display = (tooSmall() && !v.disabled) ? 'block' : 'none';
+        if (err) err.style.display = 'none';
+      }}
+      function fail(msg, el) {{
+        if (err) {{ err.textContent = msg; err.style.display = 'block'; }}
+        if (el) el.focus();
       }}
       if (v) {{
         v.addEventListener('input', function() {{ reformat(); update(); }});
+        if (unk) unk.addEventListener('change', function() {{ if (unk.checked) v.value = ''; sync(); update(); }});
+        if (role) role.addEventListener('change', function() {{ sync(); update(); }});
+        if (p) p.addEventListener('input', function() {{ sync(); update(); }});
+        sync();
         update();
       }}
       form.addEventListener('submit', function(e) {{
         var s = e.submitter;
         if (s && (s.value === 'cancel' || s.value === 'hold')) return;
-        if (blank(p) && blank(v)) {{
+        sync();
+        var msg = null, focusEl = v;
+        if (!v || v.disabled || !tooSmall()) {{
+          if (isGp()) {{ if (valNum() === null) msg = MSG.round; }}
+          else if (blank(p) && valNum() === null) {{ msg = MSG.priceOrVal; focusEl = p; }}
+          else if (!valHidden() && valNum() === null && !unkOn()) msg = MSG.valOrUnk;
+        }}
+        if (msg) {{
           e.preventDefault();
           e.stopImmediatePropagation();
-          if (err) err.style.display = 'block';
-          if (p) p.focus();
-        }} else if (tooSmall()) {{
+          if (warn) warn.style.display = 'none';
+          fail(msg, focusEl);
+        }} else if (v && !v.disabled && tooSmall()) {{
           e.preventDefault();
           e.stopImmediatePropagation();
           if (err) err.style.display = 'none';
@@ -1583,6 +1726,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
     form_html = f"""
     <h1>{side} Order: {company}</h1>
     <p class="subtitle">Hello{f" {contact_name.split()[0]}" if contact_name else ""}! Please review and update your deal details below.</p>
+    {f'<p style="background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;font-weight:600;font-size:14px;border-radius:8px;padding:10px 14px;margin:12px 0 0 0;">{form_error} Nothing was saved &mdash; your entries are kept below.</p>' if form_error else ''}
 
     {val_html}
 
@@ -1600,9 +1744,8 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
 
       <div class="field">
         <label>{price_label}</label>
-        <input type="number" name="{price_field}" value="{price_current}" step="any" placeholder="e.g. 45.50">
+        <input type="number" name="{price_field}" value="{price_current}" step="any" placeholder="e.g. 45.50">{implied_html}
       </div>
-{est_val_html}
 
       {hiive_btn_html}
 
@@ -1635,7 +1778,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
       <div class="field">
         <label>Notes</label>
         <p style="font-size:12px;color:#888;margin:-2px 0 6px 0;">See anything to add or correct above? Tell us here and we'll review and update the public notes.</p>
-        <input type="text" name="comments" placeholder="">
+        <input type="text" name="comments" value="{html.escape((posted or {}).get("comments", "").strip(), quote=True)}" placeholder="">
       </div>
 
       {spv_fields_html}{ref_bottom_html}
@@ -1972,7 +2115,12 @@ def handle_get(params: dict, event: dict = None) -> dict:
         if c_result["status"] == 200:
             company_rec = c_result["data"]
 
-    # Load full deals snapshot from S3 for mirror-anchor computation
+    unsub_url, new_url = form_links(deal)
+    return render_form(deal, company_rec, unsub_url, load_all_deals(), new_url)
+
+
+def load_all_deals() -> list:
+    """Full deals snapshot from S3 for mirror-anchor computation ([] on failure)."""
     all_deals = []
     try:
         s3  = boto3.client("s3")
@@ -1984,12 +2132,14 @@ def handle_get(params: dict, event: dict = None) -> dict:
             all_deals = data.get("deals") or []
     except Exception as e:
         logger.warning(f"Failed to load deals.json from S3: {e}")
+    return all_deals
 
+
+def form_links(deal: dict):
     contact_id = (deal.get("primary_contact") or {}).get("id", 0)
     unsub_url  = f"?action=unsubscribe&person_id={contact_id}&token={make_token(contact_id)}"
     new_url    = f"?action=new&person_id={contact_id}&token={make_new_token(contact_id)}" if contact_id else ""
-
-    return render_form(deal, company_rec, unsub_url, all_deals, new_url)
+    return unsub_url, new_url
 
 
 # ── New Order create (POST) ──────────────────────────────────────────────────
@@ -2071,7 +2221,8 @@ def handle_new_order_create(params: dict, event: dict = None) -> dict:
         "name": new_deal_name,
         "primary_contact_id": new_pid,
         "deal_stage_id": HOLD_STAGE_ID if anthropic_hold else INQUIRY_STAGE_ID,
-        "custom_fields": {DEAL_TYPE_FIELD: [new_type_id], STRUCTURE_FIELD: structure_ids},
+        "custom_fields": {DEAL_TYPE_FIELD: [new_type_id], STRUCTURE_FIELD: structure_ids,
+                          NEXUS_FIELD: [NEXUS_DIRECT_ID], CP_DIRECT_FIELD: [CP_DIRECT_YES_ID]},
     }
     if new_cid:
         deal_body["company_id"] = new_cid
@@ -2352,12 +2503,32 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
         share_val = ""
         eff_shares = _f(parse_cf(current_cf, SHARE_COUNT_FIELD))
 
-    # SPV sell orders: Est. Valuation, and net price OR valuation is required.
+    # SPV sell orders: valuation rules by Seller Role (mirrors the form's JS).
     est_val_num = parse_valuation(est_val_raw) if (submit_is_spv and sell) else None
+    est_val_unknown = False
     if submit_is_spv and sell:
-        if submit_action == "confirm" and not net_val and est_val_num is None:
-            logger.info(f"Deal {deal_id}: SPV sell submitted with neither net price nor valuation; nothing written")
-            return error_page(PRICE_OR_VAL_MSG)
+        _posted_role = params.get("seller_role", "").strip()
+        role_eff = seller_role_id(_posted_role) if _posted_role else seller_role_id(parse_cf(current_cf, SELLER_ROLE_FIELD))
+        is_gp = role_eff == SR_NEW_ALLOCATION_ID
+        val_hidden = (not is_gp) and (_f(net_val) or 0) > 0 and last_round_basis(company_rec) is not None
+        est_val_unknown = (not is_gp) and not est_val_raw and params.get("est_val_unknown", "") == "1"
+        if submit_action == "confirm":
+            val_err = None
+            if est_val_raw and est_val_num is None and not val_hidden:
+                val_err = EST_VAL_SMALL_MSG
+            elif is_gp and est_val_num is None:
+                val_err = ROUND_VAL_MSG
+            elif not is_gp and not net_val and est_val_num is None:
+                val_err = PRICE_OR_VAL_MSG
+            elif not is_gp and not val_hidden and est_val_num is None and not est_val_unknown:
+                val_err = VAL_OR_UNKNOWN_MSG
+            if val_err:
+                logger.info(f"Deal {deal_id}: SPV sell valuation rule failed ({val_err}); nothing written")
+                unsub_url, new_url = form_links(current_deal)
+                resp = render_form(current_deal, company_rec, unsub_url, load_all_deals(), new_url,
+                                   form_error=val_err, posted=params)
+                resp["statusCode"] = 400
+                return resp
         if est_val_raw and est_val_num is None:
             comments = f"Est. valuation (as typed): {est_val_raw}" + (f" | {comments}" if comments else "")
 
@@ -2441,8 +2612,10 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
     if seller_fee_val:
         try: custom[SELLER_FEE_FIELD] = float(seller_fee_val)
         except ValueError: pass
-    if est_val_num is not None:
+    if est_val_num is not None and est_val_num > 0:
         custom[EST_VAL_FIELD] = round(est_val_num / 1e9, 6)  # billions
+    elif est_val_unknown:
+        custom[EST_VAL_FIELD] = 0.0  # Unknown is stored as an explicit 0
     series_val = params.get("series", "").strip()
     if submit_is_spv and sell and share_class_val == str(PREFERRED_CLASS_ID) and series_val:
         try: custom[SERIES_FIELD] = int(series_val)
@@ -2654,9 +2827,10 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
     ]
     if submit_is_spv:
         if sell:
-            _ev_old = fmt_valuation(est_val_dollars(parse_cf(current_cf, EST_VAL_FIELD))) or "—"
-            _ev_new = fmt_valuation(est_val_num) if est_val_num is not None else _ev_old
-            rows.append(("Est. valuation", _ev_old, _ev_new))
+            _ev_old = fmt_est_val_display(parse_cf(current_cf, EST_VAL_FIELD))
+            _ev_new = fmt_est_val_display(custom[EST_VAL_FIELD]) if EST_VAL_FIELD in custom else _ev_old
+            _sr_after = custom.get(SELLER_ROLE_FIELD, parse_cf(current_cf, SELLER_ROLE_FIELD))
+            rows.append((est_val_label(_sr_after), _ev_old, _ev_new))
             _SER_LABELS = dict(SERIES_OPTS)
             def fmt_series(val):
                 if val in (None, ""):
