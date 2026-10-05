@@ -102,6 +102,7 @@ PIPELINE_JWT_KEY    = "pipeline-jwt.json"
 GROSS_FIELD       = "custom_label_3064339"
 NET_FIELD         = "custom_label_3064369"
 GROSS_CLEAR_FAIL_MSG = "Gross price did NOT clear — clear manually in Pipeline"
+GROSS_CLEAR_UNVERIFIED_MSG = "Gross clear could not be verified (Pipeline read failed) — check deal in Pipeline"
 MIN_SIZE_FIELD    = "custom_label_3065488"
 MAX_SIZE_FIELD    = "custom_label_3064645"
 MGMT_FEE_FIELD    = "custom_label_3940558"
@@ -150,6 +151,10 @@ NEW_ORDER_STRUCTURES = {
              "5077906": ("SPV",    [SPV_STRUCTURE_ID]),
              "6250090,5077906": ("Either", [DIRECT_STRUCTURE_ID, SPV_STRUCTURE_ID])},
 }
+# Sell-deal structure override (&as= / structure_override): key -> STRUCTURE_FIELD id.
+STRUCTURE_KEY_IDS = {"direct": DIRECT_STRUCTURE_ID, "spv": SPV_STRUCTURE_ID, "forward": FORWARD_STRUCTURE_ID}
+STRUCTURE_ID_KEYS = {v: k for k, v in STRUCTURE_KEY_IDS.items()}
+STRUCTURE_KEY_LABELS = {k: NEW_ORDER_STRUCTURES["sell"][str(v)][0] for k, v in STRUCTURE_KEY_IDS.items()}
 CLOSED_STAGE_NAMES   = {"obsolete", "lost", "won", "trade broken"}
 NEW_ORDER_GUARD_SECS = 600   # double-submit window for New Order creates
 SELL_TYPE_ID      = 5011675
@@ -507,6 +512,69 @@ def parse_cf(cf, field):
     if isinstance(v, list):
         return v[0] if v else None
     return v
+
+
+def structure_key(raw) -> str:
+    """Stored STRUCTURE_FIELD value (id, numeric string or list) -> "direct" / "spv" / "forward", else ""."""
+    for v in (raw if isinstance(raw, list) else [raw]):
+        try:
+            k = STRUCTURE_ID_KEYS.get(int(float(str(v))))
+        except (ValueError, TypeError):
+            continue
+        if k:
+            return k
+    return ""
+
+
+def valid_structure_override(raw) -> str:
+    """Posted/queried override -> a STRUCTURE_KEY_IDS key, else ""."""
+    k = (raw or "").strip().lower()
+    return k if k in STRUCTURE_KEY_IDS else ""
+
+
+_CORP_WORDS = {"inc", "incorporated", "corp", "corporation", "co", "llc", "ltd", "technologies",
+               "technology", "industries", "labs", "ai", "holdings", "group"}
+
+
+def normalize_company_name(name: str) -> str:
+    """Lowercase, strip punctuation, drop trailing corporate words."""
+    s = re.sub(r"['.]", "", (name or "").lower())
+    words = re.sub(r"[^a-z0-9]+", " ", s).split()
+    while words and words[-1] in _CORP_WORDS:
+        words.pop()
+    return " ".join(words)
+
+
+def company_names_match(a: str, b: str) -> bool:
+    """a, b already normalized. Equal, or one starts with the other and the
+    shorter has at least 2 words or at least 6 characters."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    short, long_ = (a, b) if len(a) <= len(b) else (b, a)
+    return long_.startswith(short) and (len(short.split()) >= 2 or len(short) >= 6)
+
+
+def similar_companies(typed: str, companies: dict, limit: int = 5) -> list:
+    """[(cid, name)] from companies {cid: name} whose normalized name matches typed's."""
+    t = normalize_company_name(typed)
+    if not t:
+        return []
+    hits = [(cid, name) for cid, name in companies.items()
+            if company_names_match(t, normalize_company_name(name))]
+    hits.sort(key=lambda h: (normalize_company_name(h[1]) != t, h[1].lower()))
+    return hits[:limit]
+
+
+def email_header_company(company: str, deal_name: str, deal_id=None) -> str:
+    """Update-email header company. Unlinked deals fall back to the deal name
+    before the first ":" plus " (not linked)"."""
+    company = (company or "").strip()
+    if company:
+        return company
+    base = (deal_name or "").split(":", 1)[0].strip() or (f"Deal #{deal_id}" if deal_id else "Unknown company")
+    return f"{base} (not linked)"
 
 
 def commission_rate_for_size(size) -> float:
@@ -900,7 +968,7 @@ _POSTED_CF = {"net": NET_FIELD, "gross": GROSS_FIELD, "share_count": SHARE_COUNT
 
 
 def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list = None, new_url: str = "",
-                form_error: str = "", posted: dict = None) -> dict:
+                form_error: str = "", posted: dict = None, structure_override: str = "") -> dict:
     cf           = dict(deal.get("custom_fields", {}) or {})
     if posted:
         for _pname, _fld in _POSTED_CF.items():
@@ -914,6 +982,34 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
     company      = (deal.get("company") or {}).get("name", "")
     company_id   = (deal.get("company") or {}).get("id")
     deal_id      = deal["id"]
+
+    # Sell deals only: &as= (or a re-rendered structure_override) renders the
+    # form as if the stored structure were that one.
+    stored_st_key = structure_key(cf.get(STRUCTURE_FIELD))
+    st_override = valid_structure_override(structure_override or (posted or {}).get("structure_override", "")) if sell else ""
+    if st_override == stored_st_key:
+        st_override = ""
+    if st_override:
+        cf[STRUCTURE_FIELD] = [STRUCTURE_KEY_IDS[st_override]]
+    order_type_html = ""
+    if sell:
+        _form_base = f"?deal_id={deal_id}&amp;token={make_deal_token(deal_id)}"
+        _lnk = "color:#2563eb;text-decoration:none;"
+        if st_override:
+            _from = STRUCTURE_KEY_LABELS.get(stored_st_key, "not set")
+            _ot_line = (f'Order type: <strong>{STRUCTURE_KEY_LABELS[st_override]}</strong> (changed from {_from})'
+                        f' &middot; <a href="{_form_base}" style="{_lnk}">Undo</a>')
+        else:
+            _alts = " &middot; ".join(
+                f'<a href="{_form_base}&amp;as={k}" style="{_lnk}font-size:13px;">{lbl}</a>'
+                for k, lbl in STRUCTURE_KEY_LABELS.items() if k != stored_st_key)
+            _ot_line = (f'Order type: <strong>{STRUCTURE_KEY_LABELS.get(stored_st_key, "Not set")}</strong>'
+                        f' &middot; <a href="#" style="{_lnk}" onclick="document.getElementById(\'stChange\').style.display=\'inline\';this.style.display=\'none\';return false;">Change</a>'
+                        f'<span id="stChange" style="display:none;"> {_alts}</span>')
+        order_type_html = (
+            f'<p style="font-size:14px;color:#374151;margin:12px 0 0 0;">{_ot_line}</p>'
+            '<p style="font-size:12px;color:#888;margin:2px 0 0 0;">Wrong order type? Click Change &mdash; '
+            'please don&rsquo;t create a new order for the same deal.</p>')
     contact      = deal.get("primary_contact") or {}
     contact_name = contact.get("full_name", "")
 
@@ -1726,12 +1822,13 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
     form_html = f"""
     <h1>{side} Order: {company}</h1>
     <p class="subtitle">Hello{f" {contact_name.split()[0]}" if contact_name else ""}! Please review and update your deal details below.</p>
+    {order_type_html}
     {f'<p style="background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;font-weight:600;font-size:14px;border-radius:8px;padding:10px 14px;margin:12px 0 0 0;">{form_error} Nothing was saved &mdash; your entries are kept below.</p>' if form_error else ''}
 
     {val_html}
 
     <form method="POST">
-      <input type="hidden" name="deal_id" value="{deal_id}">
+      <input type="hidden" name="deal_id" value="{deal_id}">{f'<input type="hidden" name="structure_override" value="{st_override}">' if st_override else ''}
 
       <div style="display:flex;gap:12px;margin-bottom:20px;">
         <button type="submit" name="submit_action" value="hold" class="btn-hold" formnovalidate
@@ -1835,7 +1932,8 @@ def success_page(message: str, subtitle: str = None, dest: str = None) -> dict:
 
 # ── New Order pages ───────────────────────────────────────────────────────────
 
-def render_new_order_page(pid: int, first_name: str, token: str, sso_email: str = "") -> dict:
+def load_new_order_companies() -> dict:
+    """{company id: name} from the deals.json snapshot (the New Order dropdown list)."""
     companies = {}
     try:
         s3  = boto3.client("s3")
@@ -1849,6 +1947,11 @@ def render_new_order_page(pid: int, first_name: str, token: str, sso_email: str 
                 companies[cid] = cname
     except Exception as e:
         logger.warning(f"new-order: failed to load deals.json: {e}")
+    return companies
+
+
+def render_new_order_page(pid: int, first_name: str, token: str, sso_email: str = "") -> dict:
+    companies = load_new_order_companies()
 
     company_options = "".join(
         f'<option value="{cid}">{html.escape(cname)}</option>'
@@ -1891,6 +1994,7 @@ def render_new_order_page(pid: int, first_name: str, token: str, sso_email: str 
 
       <div class="field">
         <label>Company</label>
+        <input type="text" id="co-search" placeholder="Type to search companies…" autocomplete="off" style="width:100%;padding:10px;font-size:15px;margin-bottom:8px;">
         <select name="company_id" required style="width:100%;padding:10px;font-size:15px;">
           <option value="">— Select a company —</option>
           {company_options}
@@ -1939,6 +2043,21 @@ def render_new_order_page(pid: int, first_name: str, token: str, sso_email: str 
       }}
       f.addEventListener('change', sync);
       sync();
+      // Company search: rebuild the select from the full list on each keystroke.
+      var sel = f.company_id, q = document.getElementById('co-search');
+      var all = Array.prototype.map.call(sel.options, function(o) {{ return [o.value, o.text]; }});
+      q.addEventListener('input', function() {{
+        var term = q.value.trim().toLowerCase(), cur = sel.value, cos = 0, last = '';
+        while (sel.options.length) sel.remove(0);
+        all.forEach(function(p) {{
+          var keep = (p[0] === '' || p[0] === 'other');
+          if (!keep && (!term || p[1].toLowerCase().indexOf(term) !== -1)) {{ keep = true; cos++; last = p[0]; }}
+          if (keep) sel.add(new Option(p[1], p[0]));
+        }});
+        sel.value = (term && cos === 1) ? last : cur;
+        if (sel.selectedIndex < 0) sel.value = '';
+        sync();
+      }});
     }})();
     </script>
     """
@@ -2116,7 +2235,8 @@ def handle_get(params: dict, event: dict = None) -> dict:
             company_rec = c_result["data"]
 
     unsub_url, new_url = form_links(deal)
-    return render_form(deal, company_rec, unsub_url, load_all_deals(), new_url)
+    return render_form(deal, company_rec, unsub_url, load_all_deals(), new_url,
+                       structure_override=params.get("as", ""))
 
 
 def load_all_deals() -> list:
@@ -2143,6 +2263,50 @@ def form_links(deal: dict):
 
 
 # ── New Order create (POST) ──────────────────────────────────────────────────
+
+def _new_order_repost_form(params: dict, side: str, overrides: dict, label: str, primary: bool = True) -> str:
+    """One-button form that re-POSTs the original New Order fields with overrides."""
+    keys = ["new_person_id", "new_token", "new_email", "side", "structure", f"attest_{side}",
+            "company_id", "company_other", "confirm_other", "confirm_new"]
+    vals = {k: params.get(k, "") for k in keys}
+    vals.update(overrides)
+    hidden = "".join(f'<input type="hidden" name="{k}" value="{html.escape(str(v), quote=True)}">'
+                     for k, v in vals.items() if str(v) != "")
+    cls = "btn-primary" if primary else "btn-cancel"
+    return (f'<form method="POST" style="margin:10px 0 0 0;">{hidden}'
+            '<input type="text" name="website" value="" style="position:absolute;left:-9999px;" tabindex="-1" autocomplete="off">'
+            f'<button type="submit" name="submit_action" value="create" class="{cls}" style="width:100%;">{html.escape(label)}</button></form>')
+
+
+def did_you_mean_page(params: dict, side: str, typed: str, matches: list) -> dict:
+    buttons = "".join(_new_order_repost_form(params, side, {"company_id": cid, "company_other": ""},
+                                             f"Yes — {name}") for cid, name in matches)
+    buttons += _new_order_repost_form(params, side, {"company_id": "other", "confirm_other": "1"},
+                                      f"No — '{typed}' is a different company", primary=False)
+    return html_response(
+        '<h1>Did you mean&hellip;?</h1>'
+        f'<p class="subtitle" style="margin-top:12px">We already list a company like &ldquo;{html.escape(typed)}&rdquo;. '
+        'Please pick it so your order is linked to the right company.</p>' + buttons)
+
+
+def open_order_page(params: dict, side: str, company_name: str, open_ids: list, picked_key: str) -> dict:
+    """Interstitial: the person already has open order(s) for this company and side."""
+    st_by_id = {}
+    if picked_key:
+        st_by_id = {d.get("id"): structure_key((d.get("custom_fields") or {}).get(STRUCTURE_FIELD))
+                    for d in load_all_deals() if d.get("id") in open_ids}
+    links = ""
+    for i in open_ids:
+        url = f"?deal_id={i}&token={make_deal_token(i)}"
+        if picked_key and st_by_id.get(i) != picked_key:
+            url += f"&as={picked_key}"
+        links += (f'<p style="margin:10px 0 0 0;"><a href="{html.escape(url)}" class="btn-primary" '
+                  f'style="display:block;text-decoration:none;text-align:center;">Update order #{i}</a></p>')
+    return html_response(
+        f'<h1>You already have an open {side} order for {html.escape(company_name)}.</h1>'
+        '<p class="subtitle" style="margin-top:12px">Update your existing order instead of creating a new one.</p>'
+        + links + _new_order_repost_form(params, side, {"confirm_new": "1"}, "No — this is a separate order", primary=False))
+
 
 def handle_new_order_create(params: dict, event: dict = None) -> dict:
     # Honeypot: bots that fill the hidden field get a fake success, no write
@@ -2176,6 +2340,10 @@ def handle_new_order_create(params: dict, event: dict = None) -> dict:
         other_name = " ".join(params.get("company_other", "").split())[:120]
         if not other_name:
             return error_page("Please type your company's name, or pick it from the list.")
+        if params.get("confirm_other", "") != "1":
+            matches = similar_companies(other_name, load_new_order_companies())
+            if matches:
+                return did_you_mean_page(params, side, other_name, matches)
         guard_co = "other-" + (re.sub(r"[^a-z0-9]+", "-", other_name.lower()).strip("-")[:60] or "unnamed")
     else:
         try:
@@ -2213,6 +2381,9 @@ def handle_new_order_create(params: dict, event: dict = None) -> dict:
 
     new_type_id = BUY_TYPE_ID if side == "buy" else SELL_TYPE_ID
     existing_open = open_orders_for(new_pid, new_cid, new_type_id) if new_cid else []
+    if existing_open and params.get("confirm_new", "") != "1":
+        picked_key = structure_key(structure_ids) if side == "sell" else ""
+        return open_order_page(params, side, new_company_name, existing_open, picked_key)
     new_deal_name = f"{new_company_name}: {side_label}"
     anthropic_hold = is_anthropic_sell(side == "sell", new_company_name, new_deal_name, bool(new_cid))
     new_stage_label = "Hold" if anthropic_hold else "Inquiry"
@@ -2286,8 +2457,8 @@ def handle_new_order_create(params: dict, event: dict = None) -> dict:
     if not new_cid:
         alerts.append(f"Company not linked — link '{other_name}' in Pipeline")
     if existing_open:
-        notes.append("Note: they already have open order(s) "
-                     + ", ".join(f"#{i}" for i in existing_open) + " for this company/side")
+        alerts.append("Note: they already have open order(s) "
+                      + ", ".join(f"#{i}" for i in existing_open) + " for this company/side")
     if sso_email:
         try:
             sso_matches = find_people_by_email(sso_email, jwt_new)
@@ -2480,13 +2651,24 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
         try: new_net_f = float(net_val)
         except ValueError: new_net_f = None
         stored_net = _f(parse_cf(current_cf, NET_FIELD))
-        if new_net_f is not None and (stored_net is None or abs(new_net_f - stored_net) > 0.0001):
+        # Only a non-zero stored gross needs clearing; none/0 means nothing is written.
+        if (new_net_f is not None and (stored_net is None or abs(new_net_f - stored_net) > 0.0001)
+                and _f(parse_cf(current_cf, GROSS_FIELD))):
             gross_clear = True
 
     eff_net    = _f(net_val)   or _f(parse_cf(current_cf, NET_FIELD))
     eff_gross  = _f(gross_val) or _f(parse_cf(current_cf, GROSS_FIELD))
     eff_shares = _f(share_val) or _f(parse_cf(current_cf, SHARE_COUNT_FIELD))
     structure  = parse_cf(current_cf, STRUCTURE_FIELD)
+
+    # Seller-chosen structure (sell deals only): replaces the stored one for
+    # every downstream decision and is written in the same PUT.
+    old_structure_key = structure_key(current_cf.get(STRUCTURE_FIELD))
+    structure_override = valid_structure_override(params.get("structure_override", "")) if sell else ""
+    if structure_override == old_structure_key:
+        structure_override = ""
+    if structure_override:
+        structure = [STRUCTURE_KEY_IDS[structure_override]]
 
     # SPV detection (mirrors render_form logic)
     submit_is_spv = False
@@ -2526,7 +2708,7 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
                 logger.info(f"Deal {deal_id}: SPV sell valuation rule failed ({val_err}); nothing written")
                 unsub_url, new_url = form_links(current_deal)
                 resp = render_form(current_deal, company_rec, unsub_url, load_all_deals(), new_url,
-                                   form_error=val_err, posted=params)
+                                   form_error=val_err, posted=params, structure_override=structure_override)
                 resp["statusCode"] = 400
                 return resp
         if est_val_raw and est_val_num is None:
@@ -2568,6 +2750,8 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
 
     # Build Pipeline update payload
     custom = {REFRESH_FIELD: 60}
+    if structure_override:
+        custom[STRUCTURE_FIELD] = [STRUCTURE_KEY_IDS[structure_override]]
     if net_val:
         try: custom[NET_FIELD] = float(net_val)
         except ValueError: pass
@@ -2670,14 +2854,20 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
         return error_page("We couldn't save your update right now. Chad has been notified.")
 
     # Confirm the stale sell gross actually cleared; never blocks the seller.
+    # Pipeline returns the cleared value as the string "0.0".
     gross_clear_failed = False
+    gross_clear_unverified = False
     if gross_clear:
         chk = call_pipeline_api("GET", f"/deals/{deal_id}.json", jwt=jwt)
-        chk_cf = (chk["data"] or {}).get("custom_fields", {}) if chk["status"] == 200 and isinstance(chk["data"], dict) else None
-        chk_gross = parse_cf(chk_cf, GROSS_FIELD) if chk_cf is not None else "unverified"
-        if chk_gross not in (None, "", 0):
-            gross_clear_failed = True
-            logger.error(f"Deal {deal_id}: gross clear not confirmed (GET {chk['status']}, gross={chk_gross!r})")
+        chk_cf = chk["data"].get("custom_fields") if chk["status"] == 200 and isinstance(chk["data"], dict) else None
+        if not isinstance(chk_cf, dict):
+            gross_clear_unverified = True
+            logger.warning(f"Deal {deal_id}: gross clear unverified (GET {chk['status']})")
+        else:
+            chk_gross = parse_cf(chk_cf, GROSS_FIELD)
+            if _f(chk_gross):
+                gross_clear_failed = True
+                logger.error(f"Deal {deal_id}: gross clear not confirmed (gross={chk_gross!r})")
 
     contact_id = (current_deal.get("primary_contact") or {}).get("id", 0)
     contact_email = ""
@@ -2705,6 +2895,10 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
             return f"${f:,.2f}"
         except Exception:
             return str(val)
+
+    def fmt_px(val):
+        # Net/gross: a stored 0 (or "0.0") means no price.
+        return "—" if _f(val) == 0 else fmt_email(val)
 
     def fmt_count(val):
         if val is None or val == "":
@@ -2747,6 +2941,7 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
 
     side = "Sell" if is_sell(current_cf) else "Buy"
     deal_name = current_deal.get("name", f"{side} Order: {company}")
+    header_company = email_header_company(company, current_deal.get("name", ""), deal_id)
 
     # Net and Gross "after" reflect what we actually wrote (or kept) to the CRM
     current_net   = parse_cf(current_cf, NET_FIELD)
@@ -2755,7 +2950,7 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
     new_gross     = custom.get(GROSS_FIELD)
     net_after     = new_net   if new_net   is not None else current_net
     gross_after   = new_gross if new_gross is not None else current_gross
-    gross_after_disp = "— (cleared)" if gross_clear else fmt_email(gross_after)
+    gross_after_disp = "— (cleared)" if gross_clear else fmt_px(gross_after)
 
     # Market row from company Hiive Bid/Ask (sell → bid, buy → ask)
     sell_deal     = is_sell(current_cf)
@@ -2817,9 +3012,9 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
             pass
 
     rows = [
-        ("Net price",   fmt_email(current_net),   fmt_email(net_after)),
+        ("Net price",   fmt_px(current_net),      fmt_px(net_after)),
         ("vs Market",   "",                       mkt_premium_str),
-        ("Gross price", fmt_email(current_gross), gross_after_disp),
+        ("Gross price", fmt_px(current_gross),    gross_after_disp),
         ("Shares",      fmt_count(parse_cf(current_cf, SHARE_COUNT_FIELD)), fmt_count(new_shares if new_shares is not None else parse_cf(current_cf, SHARE_COUNT_FIELD))),
         ("Size",
          f"{fmt_email(parse_cf(current_cf, MIN_SIZE_FIELD))} – {fmt_email(parse_cf(current_cf, MAX_SIZE_FIELD))}",
@@ -2864,6 +3059,12 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
         if sell:
             rows.append(("Seller Role", fmt_sr(parse_cf(current_cf, SELLER_ROLE_FIELD)), fmt_sr(new_sr if new_sr is not None else parse_cf(current_cf, SELLER_ROLE_FIELD))))
             rows.append(("Deadline", fmt_dl(parse_cf(current_cf, DEADLINE_FIELD)), fmt_dl(new_dl if new_dl is not None else parse_cf(current_cf, DEADLINE_FIELD))))
+    structure_change_line = ""
+    if structure_override:
+        _st_old = STRUCTURE_KEY_LABELS.get(old_structure_key, "—")
+        _st_new = STRUCTURE_KEY_LABELS[structure_override]
+        rows.append(("Structure", _st_old, _st_new))
+        structure_change_line = f"Seller changed structure: {_st_old} → {_st_new} — please review"
     rows.append(("Stage", old_stage, new_stage_name))
 
     # Plain-text fallback (preserve existing line-based format)
@@ -2877,8 +3078,9 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
         changed = " ✓" if (label not in ("vs Market",) and old_v != new_v) else ""
         table_lines.append(f"{label:<{col1}}  {old_v:<{col2}}  {new_v}{changed}")
 
+    header_text = f'{header_company}: {size_display} {"Sell" if sell_deal else "Buy"}'
     email_lines = [
-        deal_name,
+        deal_name if company else header_text,
         f"{contact_name} — {contact_email or '—'}",
         f"Deal: https://app.pipelinecrm.com/deals/{deal_id}",
         f"Lead: https://app.pipelinecrm.com/people/{contact_id}",
@@ -2889,6 +3091,10 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
         email_lines.append(f"(gross = net × {1 + commission_rate:g} ({commission_rate * 100:g}% tier) = ${est_gross_sell:,.2f}/share est.)")
     if gross_clear_failed:
         email_lines += ["", GROSS_CLEAR_FAIL_MSG]
+    elif gross_clear_unverified:
+        email_lines += ["", GROSS_CLEAR_UNVERIFIED_MSG]
+    if structure_change_line:
+        email_lines += ["", structure_change_line]
     if anthropic_hold:
         email_lines += ["", ANTHROPIC_SELL_LINE]
     if comments:
@@ -2929,7 +3135,7 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
     header_html = (
         '<h2 style="font-size:18px;font-weight:600;color:#111827;'
         'margin:0 0 6px 0;padding-bottom:6px;border-bottom:1px solid #e5e7eb;">'
-        f'{company}: {size_display} {"Sell" if sell_deal else "Buy"}'
+        f'{html.escape(header_text)}'
         '</h2>'
     )
 
@@ -2955,6 +3161,16 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
         comments_html += (
             '<p style="margin:16px 0 0 0;font-size:13px;color:#b91c1c;font-weight:600;">'
             f'{GROSS_CLEAR_FAIL_MSG}</p>'
+        )
+    elif gross_clear_unverified:
+        comments_html += (
+            '<p style="margin:16px 0 0 0;font-size:13px;color:#b91c1c;font-weight:600;">'
+            f'{GROSS_CLEAR_UNVERIFIED_MSG}</p>'
+        )
+    if structure_change_line:
+        comments_html += (
+            '<p style="margin:16px 0 0 0;font-size:13px;color:#b45309;font-weight:600;">'
+            f'{html.escape(structure_change_line)}</p>'
         )
     if anthropic_hold:
         comments_html += (
