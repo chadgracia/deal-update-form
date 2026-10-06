@@ -40,5 +40,36 @@ class QaSpvTests(unittest.TestCase):
             lf.get_jwt = orig
 
 
+class QaFieldMappingTests(unittest.TestCase):
+    def m(self, qid, answer):
+        return lf.qa_answers_to_custom({qid: {"answer": answer, "counter": "", "note": ""}})
+
+    def test_max_ticket(self):
+        self.assertEqual(self.m("max_ticket", "2,000,000")[0], {lf.MAX_SIZE_FIELD: 2000000.0})
+
+    def test_est_valuation_billions(self):
+        self.assertEqual(self.m("est_valuation", "2.5B")[0], {lf.EST_VAL_FIELD: 2.5})
+        self.assertEqual(self.m("est_valuation", "150M")[0], {lf.EST_VAL_FIELD: 0.15})
+
+    def test_est_valuation_too_small_skipped(self):
+        self.assertEqual(self.m("est_valuation", "150"), ({}, [("est_valuation", "150")]))
+
+    def test_class_both(self):
+        self.assertEqual(self.m("class", "Both")[0], {lf.SHARE_CLASS_FIELD: 5077912})
+
+    def test_fund_exemption_dont_know(self):
+        self.assertEqual(self.m("fund_exemption", "Don't know"), ({}, []))
+
+    def test_blank_and_unparseable(self):
+        self.assertEqual(self.m("max_ticket", ""), ({}, []))
+        self.assertEqual(self.m("max_ticket", "abc"), ({}, [("max_ticket", "abc")]))
+        self.assertEqual(self.m("seller_fee", "abc")[0], {})
+
+    def test_fee_structure_never_written(self):
+        for a in ("Accept", "Terms non-negotiable — original terms stand", ""):
+            self.assertEqual(self.m("fee_structure", a), ({}, []))
+        self.assertEqual(self.m("accept_bid", "Accept"), ({}, []))
+
+
 if __name__ == "__main__":
     unittest.main()

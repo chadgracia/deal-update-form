@@ -3295,6 +3295,98 @@ def _record_gp_alloc(record, deal_id):
         return False
 
 
+QA_CLASS_IDS = {"Common": 5077831, "Preferred": PREFERRED_CLASS_ID, "Both": 5077912}
+QA_FE_IDS    = {"3(c)(1)": 7200027, "3(c)(7)": 7200028, "Other": 7201486}
+QA_FIELD_NAMES = {
+    MAX_SIZE_FIELD: "Max size", MIN_SIZE_FIELD: "Min size", EST_VAL_FIELD: "Est. valuation",
+    DEADLINE_FIELD: "Deadline", SHARE_CLASS_FIELD: "Share class", SHARE_COUNT_FIELD: "Shares",
+    SELLER_FEE_FIELD: "Seller fee", DATA_ROOM_FIELD: "Data room", FUND_EXEMPT_FIELD: "Fund exemption",
+}
+
+
+def qa_answers_to_custom(answers):
+    """Seller Q&A answers -> (Pipeline custom_fields, [(qid, raw answer) not written]).
+    Same parsing as the update-form submit; blank answers are ignored, unparseable
+    ones are returned as skipped. Never maps fee_structure / accept_bid / prices."""
+    custom, skipped = {}, []
+
+    def _pos(raw):
+        try:
+            v = float(raw.replace("$", "").replace(",", ""))
+        except ValueError:
+            return None
+        return v if v > 0 else None
+
+    for qid, ad in answers.items():
+        raw = (ad.get("answer") or "").strip() if isinstance(ad, dict) else ""
+        if not raw:
+            continue
+        field, val = None, None
+        if qid in ("max_ticket", "min_ticket", "shares_avail"):
+            field = {"max_ticket": MAX_SIZE_FIELD, "min_ticket": MIN_SIZE_FIELD,
+                     "shares_avail": SHARE_COUNT_FIELD}[qid]
+            val = _pos(raw)
+        elif qid == "est_valuation":
+            # parse_valuation rejects anything under $1M (the EST_VAL_SMALL_MSG rule).
+            field = EST_VAL_FIELD
+            num = parse_valuation(raw)
+            val = round(num / 1e9, 6) if num is not None and num > 0 else None
+        elif qid == "deadline":
+            field = DEADLINE_FIELD
+            try:
+                datetime.strptime(raw, "%Y-%m-%d")
+                val = raw
+            except ValueError:
+                val = None
+        elif qid == "class":
+            field, val = SHARE_CLASS_FIELD, QA_CLASS_IDS.get(raw)
+        elif qid == "seller_fee":
+            field = SELLER_FEE_FIELD
+            try:
+                val = float(raw.replace("%", "").strip())
+            except ValueError:
+                val = None
+        elif qid == "data_room_avail":
+            field = DATA_ROOM_FIELD
+            val = {"Yes": DATA_ROOM_YES_ID, "No": DATA_ROOM_NO_ID}.get(raw)
+        elif qid == "fund_exemption":
+            if raw == "Don't know":
+                continue
+            field, val = FUND_EXEMPT_FIELD, QA_FE_IDS.get(raw)
+        else:
+            continue
+        if val is None:
+            skipped.append((qid, raw))
+        else:
+            custom[field] = val
+    return custom, skipped
+
+
+def qa_field_display(field, val):
+    """Display a Pipeline value for the Q&A 'Fields updated' list."""
+    if val in (None, ""):
+        return "—"
+    if field == EST_VAL_FIELD:
+        return fmt_est_val_display(val)
+    if field in (MAX_SIZE_FIELD, MIN_SIZE_FIELD):
+        return fmt_dollars_answer(val)
+    if field == SHARE_COUNT_FIELD:
+        return fmt(val)
+    if field == SELLER_FEE_FIELD:
+        return f"{fmt(val)}%"
+    labels = {
+        SHARE_CLASS_FIELD: {5077831: "Common", 5077834: "Preferred", 5077912: "Mixed", 5077915: "Any"},
+        DATA_ROOM_FIELD:   {DATA_ROOM_YES_ID: "Yes", DATA_ROOM_NO_ID: "No"},
+        FUND_EXEMPT_FIELD: {7200027: "3(c)(1)", 7200028: "3(c)(7)", 7201486: "Other / Non-US"},
+    }.get(field)
+    if labels:
+        try:
+            return labels.get(int(float(str(val))), str(val))
+        except (ValueError, TypeError):
+            return str(val)
+    return str(val)
+
+
 def handle_qa_submit(params: dict) -> dict:
     """Buyer submitted a batch of questions from the public deal page. Stores the set
     in S3 keyed by an opaque set_id (so the buyer's email never rides in the seller's
@@ -3580,10 +3672,23 @@ def handle_qa_answer_submit(params: dict) -> dict:
     deal_link     = f"https://ewjul4gl75iopu3yfgxfbmvyoq0tlmqf.lambda-url.us-east-1.on.aws/?deal_id={deal_id}"
     pipeline_link = f"https://app.pipelinecrm.com/deals/{deal_id}"
     company = side = gross = mn = mx = sh = ""
+    qa_custom, qa_skipped = qa_answers_to_custom(answers)
+    pipeline_updates, pipeline_write_failed = [], False
     try:
         jwt = get_jwt()
         d  = call_pipeline_api("GET", f"/deals/{deal_id}.json", jwt=jwt).get("data", {})
         cf = d.get("custom_fields", {}) or {}
+        if qa_custom:
+            _res = call_pipeline_api("PUT", f"/deals/{deal_id}.json",
+                                     {"deal": {"custom_fields": qa_custom}}, jwt=jwt)
+            if 200 <= (_res.get("status") or 0) < 300:
+                pipeline_updates = [
+                    {"field": f, "name": QA_FIELD_NAMES.get(f, f), "old": parse_cf(cf, f), "new": v}
+                    for f, v in qa_custom.items()
+                ]
+            else:
+                pipeline_write_failed = True
+                logger.error(f"QA field write failed for {deal_id}: {_res.get('status')} {_res.get('data')}")
         company = (d.get("company") or {}).get("name", "")
         side    = "Sell" if is_sell(cf) else "Buy"
         gross   = fmt(parse_cf(cf, GROSS_FIELD))
@@ -3597,6 +3702,43 @@ def handle_qa_answer_submit(params: dict) -> dict:
         call_pipeline_api("PUT", f"/deals/{deal_id}.json", {"deal": {"summary": new_summary}}, jwt=jwt)
     except Exception as e:
         logger.error(f"QA deal fetch/summary failed for {deal_id}: {e}")
+        if qa_custom and not pipeline_updates:
+            pipeline_write_failed = True
+
+    if qa_custom or qa_skipped:
+        record["pipeline_updates"] = pipeline_updates
+        if pipeline_write_failed:
+            record["pipeline_write_failed"] = True
+        try:
+            s3.put_object(Bucket=QA_BUCKET, Key=f"{deal_id}/{set_id}.json",
+                          Body=json.dumps(record).encode(), ContentType="application/json")
+        except Exception as e:
+            logger.error(f"Failed to store pipeline_updates for {deal_id}/{set_id}: {e}")
+
+    fail_banner = "PIPELINE WRITE FAILED — update these fields manually"
+    upd_plain, upd_html = "", ""
+    if pipeline_write_failed or pipeline_updates or qa_skipped:
+        _p, _h = [], []
+        if pipeline_write_failed:
+            for f, v in qa_custom.items():
+                _p.append(f"- {QA_FIELD_NAMES.get(f, f)}: {qa_field_display(f, v)} (NOT written)")
+                _h.append(f"{QA_FIELD_NAMES.get(f, f)}: {qa_field_display(f, v)} (NOT written)")
+        for u in pipeline_updates:
+            line = f"{u['name']}: {qa_field_display(u['field'], u['old'])} -> {qa_field_display(u['field'], u['new'])}"
+            _p.append(f"- {line}")
+            _h.append(line.replace("->", "&rarr;"))
+        if _p:
+            _hdr = "Fields to update manually" if pipeline_write_failed else "Fields updated in Pipeline"
+            upd_plain += f"{_hdr}:\n" + "\n".join(_p) + "\n\n"
+            upd_html += (f'<div style="font-weight:600;color:#1f2937;font-size:13px;margin-bottom:6px;">{_hdr}</div>'
+                         '<ul style="margin:0 0 14px 18px;padding:0;font-size:13px;">'
+                         + "".join(f"<li>{x}</li>" for x in _h) + '</ul>')
+        if qa_skipped:
+            _sk = [f"{qa_question_text(q, gp_alloc)}: {raw}" for q, raw in qa_skipped]
+            upd_plain += "Not written (couldn't parse):\n" + "\n".join(f"- {x}" for x in _sk) + "\n\n"
+            upd_html += ('<div style="font-weight:600;color:#1f2937;font-size:13px;margin-bottom:6px;">Not written (couldn&rsquo;t parse)</div>'
+                         '<ul style="margin:0 0 14px 18px;padding:0;font-size:13px;">'
+                         + "".join(f"<li>{html.escape(x)}</li>" for x in _sk) + '</ul>')
 
     details = []
     if company: details.append(("Company", company))
@@ -3646,21 +3788,25 @@ def handle_qa_answer_submit(params: dict) -> dict:
         send_email(buyer_email, f"Answers on {deal_name}", plain, html=email_html(inner))
 
     chad_inner = (
-        f'<h2 style="margin:0 0 4px 0;font-size:18px;color:#111;">{deal_name}</h2>'
+        (f'<p style="margin:0 0 12px 0;padding:8px 12px;background:#fef2f2;border:1px solid #fca5a5;border-radius:6px;color:#b91c1c;font-weight:700;">{fail_banner}</p>'
+         if pipeline_write_failed else '')
+        + f'<h2 style="margin:0 0 4px 0;font-size:18px;color:#111;">{deal_name}</h2>'
         f'<p style="margin:0 0 14px 0;color:#4b5563;font-size:14px;">Seller answered the buyer Q&amp;A (deal {deal_id}).</p>'
         '<table style="border-collapse:collapse;width:100%;margin-bottom:14px;font-size:13px;">'
         f'<tr><td style="padding:4px 10px;color:#6b7280;">Buyer</td><td style="padding:4px 10px;color:#111;">{buyer_name or "—"} &lt;{buyer_email or "—"}&gt;</td></tr>'
         f'<tr><td style="padding:4px 10px;color:#6b7280;">Seller</td><td style="padding:4px 10px;color:#111;">&lt;{seller_email or "—"}&gt;</td></tr>'
         '</table>'
         f'<table style="border-collapse:collapse;width:100%;margin-bottom:18px;font-size:14px;">{qa_rows(True)}</table>'
+        f'{upd_html}'
         f'{details_html}'
         f'<a href="{deal_link}" style="display:inline-block;padding:9px 16px;background:#1a1a1a;color:#ffffff;text-decoration:none;border-radius:6px;font-size:13px;margin-right:8px;">Deal page</a>'
         f'<a href="{pipeline_link}" style="display:inline-block;padding:9px 16px;background:#374151;color:#ffffff;text-decoration:none;border-radius:6px;font-size:13px;">Pipeline</a>'
     )
     chad_plain = (
-        f"Seller answered the buyer Q&A on {deal_name} (deal {deal_id}).\n\n"
+        (f"{fail_banner}\n\n" if pipeline_write_failed else "")
+        + f"Seller answered the buyer Q&A on {deal_name} (deal {deal_id}).\n\n"
         f"Buyer: {buyer_name or '—'} <{buyer_email or '—'}>\nSeller: <{seller_email or '—'}>\n\n"
-        + "\n".join(priv_lines) + f"\n\nDeal: {deal_link}\nPipeline: {pipeline_link}"
+        + "\n".join(priv_lines) + "\n\n" + upd_plain + f"Deal: {deal_link}\nPipeline: {pipeline_link}"
     )
     send_email(CHAD_EMAIL, f"Buyer Q&A answered: {deal_name} (#{deal_id})", chad_plain, html=email_html(chad_inner))
 
@@ -3818,7 +3964,7 @@ def handle_qa_answer_page(qs: dict) -> dict:
                 f'<input type="number" step="any" name="a_{qid}" placeholder="e.g. 2000000"></div>'
             )
         elif qid == "est_valuation":
-            rows += f'<input type="text" name="a_{qid}" placeholder="e.g. $2.5B">'
+            rows += f'<input type="text" name="a_{qid}" placeholder="e.g. 150M or 2.5B">'
         else:
             rows += f'<input type="text" name="a_{qid}" placeholder="Your answer">'
         rows += '</div>'
