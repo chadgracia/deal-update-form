@@ -3327,10 +3327,9 @@ def qa_answers_to_custom(answers):
                      "shares_avail": SHARE_COUNT_FIELD}[qid]
             val = _pos(raw)
         elif qid == "est_valuation":
-            # parse_valuation rejects anything under $1M (the EST_VAL_SMALL_MSG rule).
             field = EST_VAL_FIELD
-            num = parse_valuation(raw)
-            val = round(num / 1e9, 6) if num is not None and num > 0 else None
+            num = parse_qa_valuation_billions(raw)
+            val = round(num, 6) if num is not None else None
         elif qid == "deadline":
             field = DEADLINE_FIELD
             try:
@@ -3360,6 +3359,30 @@ def qa_answers_to_custom(answers):
         else:
             custom[field] = val
     return custom, skipped
+
+
+def parse_qa_valuation_billions(raw):
+    """Q&A est. valuation answer -> billions, or None. "2.5" / "$2.5B" -> 2.5,
+    "150M" -> 0.15, "150,000,000" -> 0.15; bare 1,000-999,999 is ambiguous -> None.
+    Must be at least $1M (0.001)."""
+    if raw in (None, ""):
+        return None
+    s = str(raw).strip().lower().replace("$", "").replace(",", "").replace(" ", "")
+    m = re.fullmatch(r"(\d+(?:\.\d*)?|\.\d+)([bm]?)", s)
+    if not m:
+        return None
+    n = float(m.group(1))
+    if m.group(2) == "b":
+        val = n
+    elif m.group(2) == "m":
+        val = n / 1000
+    elif n < 1000:
+        val = n
+    elif n >= 1_000_000:
+        val = n / 1e9
+    else:
+        return None
+    return val if val >= 0.001 else None
 
 
 def qa_field_display(field, val):
@@ -3614,9 +3637,10 @@ def handle_qa_answer_submit(params: dict) -> dict:
                             else "Done — the deal is cancelled and the questioner has been notified.")
 
     gp_alloc = _record_gp_alloc(record, deal_id) if "est_valuation" in record.get("question_ids", []) else False
-    answers, public_lines, priv_lines = {}, [], []
+    answers, public_lines, priv_lines, note_lines, raw_answers = {}, [], [], [], {}
     for qid in record.get("question_ids", []):
         a       = (params.get(f"a_{qid}", "") or "").strip()
+        raw_answers[qid] = {"answer": a}
         counter = (params.get(f"c_{qid}", "") or "").strip()
         note    = (params.get(f"o_{qid}", "") or "").strip()
         # A "fees" answer: Accept / Non-negotiable / Counter. Counters fold three
@@ -3647,6 +3671,10 @@ def handle_qa_answer_submit(params: dict) -> dict:
                 counter += f"; minimum size for counter terms ${_bmin.lstrip('$')}"
         if QA_ANSWER.get(qid, {}).get("type") == "dollars" and a:
             a = fmt_dollars_answer(a)
+        if qid == "est_valuation" and a:
+            _bn = parse_qa_valuation_billions(a)
+            if _bn is not None:
+                a = fmt_est_val_display(round(_bn, 6))
         answers[qid] = {"answer": a, "counter": counter, "note": note}
         pub = []
         if a: pub.append(a)
@@ -3655,6 +3683,8 @@ def handle_qa_answer_submit(params: dict) -> dict:
         prv = list(pub)
         if note: prv.append(f"note (Gracia only): {note}")
         priv_lines.append(f"- {qa_question_text(qid, gp_alloc)}\n    {'; '.join(prv) if prv else '(no response)'}")
+        if prv:
+            note_lines.append(f"- {qa_question_text(qid, gp_alloc)} : {'; '.join(prv)}")
 
     general_note = (params.get("o_general", "") or "").strip()
     if general_note:
@@ -3672,8 +3702,9 @@ def handle_qa_answer_submit(params: dict) -> dict:
     deal_link     = f"https://ewjul4gl75iopu3yfgxfbmvyoq0tlmqf.lambda-url.us-east-1.on.aws/?deal_id={deal_id}"
     pipeline_link = f"https://app.pipelinecrm.com/deals/{deal_id}"
     company = side = gross = mn = mx = sh = ""
-    qa_custom, qa_skipped = qa_answers_to_custom(answers)
+    qa_custom, qa_skipped = qa_answers_to_custom(raw_answers)
     pipeline_updates, pipeline_write_failed = [], False
+    jwt = None
     try:
         jwt = get_jwt()
         d  = call_pipeline_api("GET", f"/deals/{deal_id}.json", jwt=jwt).get("data", {})
@@ -3695,15 +3726,32 @@ def handle_qa_answer_submit(params: dict) -> dict:
         mn      = fmt(parse_cf(cf, MIN_SIZE_FIELD))
         mx      = fmt(parse_cf(cf, MAX_SIZE_FIELD))
         sh      = fmt(parse_cf(cf, SHARE_COUNT_FIELD))
-        existing_summary = (d.get("summary") or "").strip()
-        stamp = datetime.now(timezone.utc).strftime("%b %d, %Y")
-        qa_block = f"Q&A ({stamp}):\n" + "\n".join(public_lines)
-        new_summary = (existing_summary + "\n\n" + qa_block) if existing_summary else qa_block
-        call_pipeline_api("PUT", f"/deals/{deal_id}.json", {"deal": {"summary": new_summary}}, jwt=jwt)
     except Exception as e:
-        logger.error(f"QA deal fetch/summary failed for {deal_id}: {e}")
+        logger.error(f"QA deal fetch/field write failed for {deal_id}: {e}")
         if qa_custom and not pipeline_updates:
             pipeline_write_failed = True
+
+    # Internal Pipeline note (never the public deal summary).
+    _fields_txt = ", ".join(
+        f"{u['name']}: {qa_field_display(u['field'], u['old'])} -> {qa_field_display(u['field'], u['new'])}"
+        for u in pipeline_updates) or ("none (field write FAILED)" if pipeline_write_failed else "none")
+    note_content = (
+        f"Client updated ({datetime.now(timezone.utc).strftime('%Y-%m-%d')}) via buyer Q&A:\n"
+        + ("\n".join(note_lines) + "\n" if note_lines else "")
+        + (f"Private note to Gracia: {general_note}\n" if general_note else "")
+        + f"Fields updated: {_fields_txt}"
+    )
+    note_failed = False
+    try:
+        _nres = call_pipeline_api("POST", "/notes.json",
+                                  {"note": {"content": note_content, "note_category_id": 69759,
+                                            "deal_id": int(deal_id)}}, jwt=jwt or get_jwt())
+        if not 200 <= (_nres.get("status") or 0) < 300:
+            note_failed = True
+            logger.error(f"QA note POST failed for {deal_id}: {_nres.get('status')} {_nres.get('data')}")
+    except Exception as e:
+        note_failed = True
+        logger.error(f"QA note POST failed for {deal_id}: {e}")
 
     if qa_custom or qa_skipped:
         record["pipeline_updates"] = pipeline_updates
@@ -3787,8 +3835,11 @@ def handle_qa_answer_submit(params: dict) -> dict:
                    "or contact Chad Gracia at cgracia@rainmakersecurities.com.")
         send_email(buyer_email, f"Answers on {deal_name}", plain, html=email_html(inner))
 
+    note_warn = "Pipeline note NOT saved — Q&A answers are only in this email."
     chad_inner = (
-        (f'<p style="margin:0 0 12px 0;padding:8px 12px;background:#fef2f2;border:1px solid #fca5a5;border-radius:6px;color:#b91c1c;font-weight:700;">{fail_banner}</p>'
+        (f'<p style="margin:0 0 12px 0;padding:8px 12px;background:#fef2f2;border:1px solid #fca5a5;border-radius:6px;color:#b91c1c;font-weight:700;">{note_warn}</p>'
+         if note_failed else '')
+        + (f'<p style="margin:0 0 12px 0;padding:8px 12px;background:#fef2f2;border:1px solid #fca5a5;border-radius:6px;color:#b91c1c;font-weight:700;">{fail_banner}</p>'
          if pipeline_write_failed else '')
         + f'<h2 style="margin:0 0 4px 0;font-size:18px;color:#111;">{deal_name}</h2>'
         f'<p style="margin:0 0 14px 0;color:#4b5563;font-size:14px;">Seller answered the buyer Q&amp;A (deal {deal_id}).</p>'
@@ -3803,7 +3854,8 @@ def handle_qa_answer_submit(params: dict) -> dict:
         f'<a href="{pipeline_link}" style="display:inline-block;padding:9px 16px;background:#374151;color:#ffffff;text-decoration:none;border-radius:6px;font-size:13px;">Pipeline</a>'
     )
     chad_plain = (
-        (f"{fail_banner}\n\n" if pipeline_write_failed else "")
+        (f"{note_warn}\n" if note_failed else "")
+        + (f"{fail_banner}\n\n" if pipeline_write_failed else ("\n" if note_failed else ""))
         + f"Seller answered the buyer Q&A on {deal_name} (deal {deal_id}).\n\n"
         f"Buyer: {buyer_name or '—'} <{buyer_email or '—'}>\nSeller: <{seller_email or '—'}>\n\n"
         + "\n".join(priv_lines) + "\n\n" + upd_plain + f"Deal: {deal_link}\nPipeline: {pipeline_link}"
@@ -3964,7 +4016,12 @@ def handle_qa_answer_page(qs: dict) -> dict:
                 f'<input type="number" step="any" name="a_{qid}" placeholder="e.g. 2000000"></div>'
             )
         elif qid == "est_valuation":
-            rows += f'<input type="text" name="a_{qid}" placeholder="e.g. 150M or 2.5B">'
+            rows += (
+                '<div style="display:flex;align-items:center;gap:6px;"><span>$</span>'
+                f'<input type="text" name="a_{qid}" placeholder="e.g. 2.5"><span>B</span></div>'
+                '<div style="font-size:12px;color:#6b7280;margin-top:4px;font-weight:400;">'
+                'In billions — 2.5 = $2.5B, 0.15 = $150M</div>'
+            )
         else:
             rows += f'<input type="text" name="a_{qid}" placeholder="Your answer">'
         rows += '</div>'

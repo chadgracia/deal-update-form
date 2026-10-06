@@ -1,3 +1,5 @@
+import io
+import json
 import os
 import sys
 import unittest
@@ -52,7 +54,7 @@ class QaFieldMappingTests(unittest.TestCase):
         self.assertEqual(self.m("est_valuation", "150M")[0], {lf.EST_VAL_FIELD: 0.15})
 
     def test_est_valuation_too_small_skipped(self):
-        self.assertEqual(self.m("est_valuation", "150"), ({}, [("est_valuation", "150")]))
+        self.assertEqual(self.m("est_valuation", "5000"), ({}, [("est_valuation", "5000")]))
 
     def test_class_both(self):
         self.assertEqual(self.m("class", "Both")[0], {lf.SHARE_CLASS_FIELD: 5077912})
@@ -69,6 +71,80 @@ class QaFieldMappingTests(unittest.TestCase):
         for a in ("Accept", "Terms non-negotiable — original terms stand", ""):
             self.assertEqual(self.m("fee_structure", a), ({}, []))
         self.assertEqual(self.m("accept_bid", "Accept"), ({}, []))
+
+
+class ParseQaValuationTests(unittest.TestCase):
+    def test_cases(self):
+        cases = {"2.5": 2.5, "0.15": 0.15, "$2.5B": 2.5, "150M": 0.15, "150,000,000": 0.15,
+                 "5000": None, "0.0005": None, "abc": None, "": None}
+        for raw, want in cases.items():
+            got = lf.parse_qa_valuation_billions(raw)
+            if want is None:
+                self.assertIsNone(got, raw)
+            else:
+                self.assertAlmostEqual(got, want, msg=raw)
+
+
+class QaAnswerSubmitTests(unittest.TestCase):
+    def run_submit(self, note_status=200):
+        rec = {"status": "pending", "deal_name": "Acme SPV", "buyer_email": "b@x.com",
+               "buyer_name": "Bob B", "seller_email": "s@x.com", "gp_allocation": False,
+               "question_ids": ["max_ticket", "est_valuation", "class", "fee_structure"]}
+        self.stored = {}
+        test = self
+
+        class S3:
+            def get_object(self, **k):
+                return {"Body": io.BytesIO(json.dumps(rec).encode())}
+
+            def put_object(self, **k):
+                test.stored = json.loads(k["Body"])
+
+        self.calls, self.emails = [], []
+
+        def api(method, endpoint, payload=None, jwt=None):
+            self.calls.append((method, endpoint, payload))
+            if method == "GET":
+                return {"status": 200, "data": {"summary": "x", "custom_fields": {}}}
+            if endpoint == "/notes.json":
+                return {"status": note_status, "data": {}}
+            return {"status": 200, "data": {}}
+
+        orig = (lf.boto3.client, lf.verify_token, lf.get_jwt, lf.call_pipeline_api, lf.send_email)
+        lf.boto3.client = lambda *a, **k: S3()
+        lf.verify_token = lambda *a: True
+        lf.get_jwt = lambda: "j"
+        lf.call_pipeline_api = api
+        lf.send_email = lambda to, subj, body, html=None: self.emails.append((to, body, html))
+        try:
+            lf.handle_qa_answer_submit({"deal_id": "9", "set": "s", "token": "t",
+                                        "a_max_ticket": "2000000", "a_est_valuation": "2.5",
+                                        "a_class": "Both", "a_fee_structure": "Accept"})
+        finally:
+            (lf.boto3.client, lf.verify_token, lf.get_jwt, lf.call_pipeline_api, lf.send_email) = orig
+
+    def test_no_summary_one_note(self):
+        self.run_submit()
+        puts = [p for m, e, p in self.calls if m == "PUT"]
+        self.assertTrue(puts)
+        self.assertFalse(any("summary" in p["deal"] for p in puts))
+        notes = [p for m, e, p in self.calls if m == "POST" and e == "/notes.json"]
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0]["note"]["deal_id"], 9)
+        self.assertTrue(notes[0]["note"]["content"].startswith("Client updated ("))
+        self.assertEqual(puts[0]["deal"]["custom_fields"][lf.EST_VAL_FIELD], 2.5)
+        self.assertEqual(self.stored["answers"]["est_valuation"]["answer"], "$2.5B")
+        self.assertEqual(len(self.emails), 2)
+        self.assertFalse(any("Pipeline note NOT saved" in b for _, b, _ in self.emails))
+
+    def test_note_failure_warns_chad(self):
+        self.run_submit(note_status=500)
+        self.assertEqual(len(self.emails), 2)
+        buyer = [b for t, b, _ in self.emails if t == "b@x.com"][0]
+        chad = [(b, h) for t, b, h in self.emails if t != "b@x.com"][0]
+        self.assertNotIn("Pipeline note NOT saved", buyer)
+        self.assertTrue(chad[0].startswith("Pipeline note NOT saved — Q&A answers are only in this email."))
+        self.assertIn("Pipeline note NOT saved", chad[1])
 
 
 if __name__ == "__main__":
