@@ -72,7 +72,26 @@ QA_TEXT = {
     "accept_common":"Would you accept common shares?",
     "move_bid_up":  "Would you move your bid up?",
     "fund_exemption": "What is the fund exemption — 3(c)(1) or 3(c)(7)?",
+    "max_ticket":    "What is the maximum ticket you can take?",
+    "min_ticket":    "What is the minimum ticket?",
+    "est_valuation": "What is the estimated valuation?",
 }
+
+
+def qa_question_text(qid, gp_alloc=False):
+    if qid == "est_valuation" and gp_alloc:
+        return "What is the round valuation (pre-money)?"
+    return QA_TEXT.get(qid, qid)
+
+
+def fmt_dollars_answer(a):
+    """'2000000' -> '$2,000,000'; non-numeric answers pass through unchanged."""
+    try:
+        v = float(str(a).replace(",", "").replace("$", "").strip())
+    except (ValueError, TypeError):
+        return a
+    return f"${v:,.0f}" if v == int(v) else f"${v:,.2f}"
+
 QA_ANSWER = {
     "accept_bid":    {"type": "offer"},
     "deadline":      {"type": "date"},
@@ -94,6 +113,9 @@ QA_ANSWER = {
     "accept_common": {"type": "bool"},
     "move_bid_up":   {"type": "offer"},
     "fund_exemption": {"type": "choice", "options": ["3(c)(1)", "3(c)(7)", "Other", "Don't know"]},
+    "max_ticket":    {"type": "dollars"},
+    "min_ticket":    {"type": "dollars"},
+    "est_valuation": {"type": "text"},
 }
 TRADES_URL          = "https://trades.graciagroup.com"
 PIPELINE_JWT_BUCKET = "pipeline-token"
@@ -3259,6 +3281,20 @@ def _weekly_signup_success(deal_id: str) -> dict:
     return html_response(body)
 
 
+def _record_gp_alloc(record, deal_id):
+    """GP-allocation flag for a Q&A record; legacy records fall back to a deal fetch."""
+    if "gp_allocation" in record:
+        return bool(record["gp_allocation"])
+    try:
+        jwt = get_jwt()
+        d = call_pipeline_api("GET", f"/deals/{deal_id}.json", jwt=jwt).get("data", {})
+        cf = d.get("custom_fields", {}) or {}
+        return seller_role_id(parse_cf(cf, SELLER_ROLE_FIELD)) == SR_NEW_ALLOCATION_ID
+    except Exception as e:
+        logger.error(f"QA gp_allocation lookup failed for {deal_id}: {e}")
+        return False
+
+
 def handle_qa_submit(params: dict) -> dict:
     """Buyer submitted a batch of questions from the public deal page. Stores the set
     in S3 keyed by an opaque set_id (so the buyer's email never rides in the seller's
@@ -3311,6 +3347,7 @@ def handle_qa_submit(params: dict) -> dict:
     sell_deal     = is_sell(cf)
     asker_role    = "buyer"  if sell_deal else "seller"
     answerer_role = "seller" if sell_deal else "buyer"
+    gp_alloc      = seller_role_id(parse_cf(cf, SELLER_ROLE_FIELD)) == SR_NEW_ALLOCATION_ID
 
     seller_email = ""
     seller_first = ""
@@ -3331,6 +3368,7 @@ def handle_qa_submit(params: dict) -> dict:
         "fee_onetime": fee_onetime, "fee_man": fee_man, "fee_carry": fee_carry,
         "seller_email": seller_email, "status": "pending",
         "answerer_role": answerer_role, "asker_role": asker_role,
+        "gp_allocation": gp_alloc,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     try:
@@ -3345,7 +3383,7 @@ def handle_qa_submit(params: dict) -> dict:
                 if sell_deal:
                     return f"- Would you accept a bid of ${bid_amount}/share (gross){size_txt}?"
                 return f"- Would you bid ${bid_amount}/share (gross){size_txt}?"
-            return f"- {QA_TEXT.get(qid, qid)}"
+            return f"- {qa_question_text(qid, gp_alloc)}"
         q_block = "\n".join(q_line(q) for q in selected)
 
         answer_link = f"{QA_SELF_URL}?qa=answer&deal_id={deal_id}&set={set_id}&token={make_token(set_id)}"
@@ -3483,6 +3521,7 @@ def handle_qa_answer_submit(params: dict) -> dict:
                             if deal_action == "hold"
                             else "Done — the deal is cancelled and the questioner has been notified.")
 
+    gp_alloc = _record_gp_alloc(record, deal_id) if "est_valuation" in record.get("question_ids", []) else False
     answers, public_lines, priv_lines = {}, [], []
     for qid in record.get("question_ids", []):
         a       = (params.get(f"a_{qid}", "") or "").strip()
@@ -3514,14 +3553,16 @@ def handle_qa_answer_submit(params: dict) -> dict:
             _bmin = (params.get(f"m_{qid}", "") or "").strip()
             if _bmin:
                 counter += f"; minimum size for counter terms ${_bmin.lstrip('$')}"
+        if QA_ANSWER.get(qid, {}).get("type") == "dollars" and a:
+            a = fmt_dollars_answer(a)
         answers[qid] = {"answer": a, "counter": counter, "note": note}
         pub = []
         if a: pub.append(a)
         if counter: pub.append(f"counter: {counter}")
-        public_lines.append(f"- {QA_TEXT.get(qid, qid)}\n    {'; '.join(pub) if pub else '(no response)'}")
+        public_lines.append(f"- {qa_question_text(qid, gp_alloc)}\n    {'; '.join(pub) if pub else '(no response)'}")
         prv = list(pub)
         if note: prv.append(f"note (Gracia only): {note}")
-        priv_lines.append(f"- {QA_TEXT.get(qid, qid)}\n    {'; '.join(prv) if prv else '(no response)'}")
+        priv_lines.append(f"- {qa_question_text(qid, gp_alloc)}\n    {'; '.join(prv) if prv else '(no response)'}")
 
     general_note = (params.get("o_general", "") or "").strip()
     if general_note:
@@ -3583,7 +3624,7 @@ def handle_qa_answer_submit(params: dict) -> dict:
                 parts.append(f'<span style="color:#b45309;">note (Gracia only): {ad["note"]}</span>')
             ans = "; ".join(parts) if parts else "(no response)"
             out += (
-                f'<tr><td style="padding:6px 10px;border-bottom:1px solid #eee;color:#374151;">{QA_TEXT.get(qid, qid)}</td>'
+                f'<tr><td style="padding:6px 10px;border-bottom:1px solid #eee;color:#374151;">{qa_question_text(qid, gp_alloc)}</td>'
                 f'<td style="padding:6px 10px;border-bottom:1px solid #eee;font-weight:600;color:#111;">{ans}</td></tr>'
             )
         return out
@@ -3671,9 +3712,10 @@ def handle_qa_answer_page(qs: dict) -> dict:
     asker_role = "buyer" if answerer_role == "seller" else "seller"
     offer_word = "bid"   if answerer_role == "seller" else "offer"
 
+    gp_alloc = _record_gp_alloc(record, deal_id) if "est_valuation" in record.get("question_ids", []) else False
     rows = ""
     for qid in record.get("question_ids", []):
-        qtext = QA_TEXT.get(qid, qid)
+        qtext = qa_question_text(qid, gp_alloc)
         atype = QA_ANSWER.get(qid, {}).get("type", "text")
         opts  = QA_ANSWER.get(qid, {}).get("options", [])
 
@@ -3770,6 +3812,13 @@ def handle_qa_answer_page(qs: dict) -> dict:
             rows += f'<input type="date" name="a_{qid}">'
         elif atype == "number":
             rows += f'<input type="number" step="any" name="a_{qid}" placeholder="Enter a number">'
+        elif atype == "dollars":
+            rows += (
+                '<div style="display:flex;align-items:center;gap:6px;"><span>$</span>'
+                f'<input type="number" step="any" name="a_{qid}" placeholder="e.g. 2000000"></div>'
+            )
+        elif qid == "est_valuation":
+            rows += f'<input type="text" name="a_{qid}" placeholder="e.g. $2.5B">'
         else:
             rows += f'<input type="text" name="a_{qid}" placeholder="Your answer">'
         rows += '</div>'
