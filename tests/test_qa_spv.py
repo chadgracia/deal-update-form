@@ -147,5 +147,66 @@ class QaAnswerSubmitTests(unittest.TestCase):
         self.assertIn("Pipeline note NOT saved", chad[1])
 
 
+class QaDisplayAnswerTests(unittest.TestCase):
+    def test_cases(self):
+        cases = [(("est_valuation", "5"), "$5B"), (("seller_fee", "3"), "3%"),
+                 (("seller_fee", "3%"), "3%"), (("deadline", "2026-10-13"), "Oct 13, 2026"),
+                 (("deadline", "soon"), "soon"), (("max_ticket", "500000"), "$500,000"),
+                 (("shares_avail", "12500"), "12,500 shares"), (("data_room_avail", "Yes"), "Yes")]
+        for args, want in cases:
+            self.assertEqual(lf.qa_display_answer(*args), want, args)
+
+
+DISPLAY_SUBMIT_PARAMS = {
+    "a_max_ticket": "2000000", "a_est_valuation": "2.5", "a_class": "Both",
+    "a_seller_fee": "3%", "a_deadline": "2026-10-13", "a_shares_avail": "12500",
+    "a_accept_bid": "Decline", "c_accept_bid": "12", "m_accept_bid": "500000",
+}
+DISPLAY_SUBMIT_PUT = {"deal": {"custom_fields": {
+    lf.MAX_SIZE_FIELD: 2000000.0, lf.EST_VAL_FIELD: 2.5, lf.SHARE_CLASS_FIELD: 5077912,
+    lf.SELLER_FEE_FIELD: 3.0, lf.DEADLINE_FIELD: "2026-10-13", lf.SHARE_COUNT_FIELD: 12500.0,
+}}}
+
+
+class QaDisplaySubmitTests(unittest.TestCase):
+    def test_note_format_and_put_unchanged(self):
+        rec = {"status": "pending", "deal_name": "Acme", "buyer_email": "b@x.com",
+               "buyer_name": "Bob", "seller_email": "s@x.com", "gp_allocation": False,
+               "question_ids": ["max_ticket", "est_valuation", "class", "seller_fee",
+                                "deadline", "shares_avail", "accept_bid"]}
+        calls, emails = [], []
+
+        class S3:
+            def get_object(self, **k):
+                return {"Body": io.BytesIO(json.dumps(rec).encode())}
+
+            def put_object(self, **k):
+                pass
+
+        def api(method, endpoint, payload=None, jwt=None):
+            calls.append((method, endpoint, payload))
+            if method == "GET":
+                return {"status": 200, "data": {"custom_fields": {}}}
+            return {"status": 200, "data": {}}
+
+        orig = (lf.boto3.client, lf.verify_token, lf.get_jwt, lf.call_pipeline_api, lf.send_email)
+        lf.boto3.client = lambda *a, **k: S3()
+        lf.verify_token = lambda *a: True
+        lf.get_jwt = lambda: "j"
+        lf.call_pipeline_api = api
+        lf.send_email = lambda to, subj, body, html=None: emails.append((to, body))
+        try:
+            lf.handle_qa_answer_submit(dict(DISPLAY_SUBMIT_PARAMS, deal_id="9", set="s", token="t"))
+        finally:
+            (lf.boto3.client, lf.verify_token, lf.get_jwt, lf.call_pipeline_api, lf.send_email) = orig
+        note = [p for m, e, p in calls if e == "/notes.json"][0]["note"]["content"]
+        self.assertIn("? $2,000,000", note)
+        self.assertNotIn(" : ", note)
+        self.assertIn("minimum size for counter terms $500,000", note)
+        for _, body in emails:
+            self.assertIn("$500,000", body)
+        self.assertEqual([p for m, e, p in calls if m == "PUT"], [DISPLAY_SUBMIT_PUT])
+
+
 if __name__ == "__main__":
     unittest.main()

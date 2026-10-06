@@ -3385,6 +3385,59 @@ def parse_qa_valuation_billions(raw):
     return val if val >= 0.001 else None
 
 
+def _qa_num(raw):
+    try:
+        return float(str(raw).replace("$", "").replace(",", "").replace("%", "").strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def _qa_pct(v):
+    return f"{int(v)}%" if v == int(v) else f"{v:g}%"
+
+
+def fmt_qa_date(raw):
+    """'2026-10-13' (or a stored ISO timestamp) -> 'Oct 13, 2026'; else None."""
+    s = str(raw or "").strip()
+    if not re.match(r"\d{4}-\d{2}-\d{2}($|T| )", s):
+        return None
+    try:
+        d = datetime.strptime(s[:10], "%Y-%m-%d")
+    except ValueError:
+        return None
+    return f"{d:%b} {d.day}, {d.year}"
+
+
+def qa_dollar_in_text(raw):
+    """Counter-text amount: '500000' / '$500000' -> '$500,000'; non-numeric kept, '$'-prefixed."""
+    out = fmt_dollars_answer(str(raw).strip().lstrip("$"))
+    return out if str(out).startswith("$") else f"${out}"
+
+
+def qa_display_answer(qid, raw):
+    """Display text for a seller Q&A answer (emails, note, record copy). Display only."""
+    if raw in (None, ""):
+        return raw
+    if qid == "est_valuation":
+        bn = parse_qa_valuation_billions(raw)
+        return fmt_est_val_display(round(bn, 6)) if bn is not None else raw
+    if QA_ANSWER.get(qid, {}).get("type") == "dollars":
+        return fmt_dollars_answer(raw)
+    if qid == "seller_fee":
+        v = _qa_num(raw)
+        return _qa_pct(v) if v is not None else raw
+    if qid == "deadline":
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(raw).strip()):
+            return fmt_qa_date(raw) or raw
+        return raw
+    if qid == "shares_avail":
+        v = _qa_num(raw)
+        if v is None:
+            return raw
+        return (f"{int(v):,}" if v == int(v) else f"{v:,.2f}") + " shares"
+    return raw
+
+
 def qa_field_display(field, val):
     """Display a Pipeline value for the Q&A 'Fields updated' list."""
     if val in (None, ""):
@@ -3396,7 +3449,10 @@ def qa_field_display(field, val):
     if field == SHARE_COUNT_FIELD:
         return fmt(val)
     if field == SELLER_FEE_FIELD:
-        return f"{fmt(val)}%"
+        v = _qa_num(val)
+        return _qa_pct(v) if v is not None else str(val)
+    if field == DEADLINE_FIELD:
+        return fmt_qa_date(val) or str(val)
     labels = {
         SHARE_CLASS_FIELD: {5077831: "Common", 5077834: "Preferred", 5077912: "Mixed", 5077915: "Any"},
         DATA_ROOM_FIELD:   {DATA_ROOM_YES_ID: "Yes", DATA_ROOM_NO_ID: "No"},
@@ -3663,19 +3719,15 @@ def handle_qa_answer_submit(params: dict) -> dict:
                 if _c: _p.append(f"carry {_c}%")
                 counter = ", ".join(_p)
                 if counter and _min:
-                    counter += f"; applies for investment minimum of ${_min.lstrip('$')}"
+                    counter += f"; applies for investment minimum of {qa_dollar_in_text(_min)}"
         # An "offer" (bid) counter: append the minimum size the counter price applies to.
         if QA_ANSWER.get(qid, {}).get("type") == "offer" and counter:
             _bmin = (params.get(f"m_{qid}", "") or "").strip()
             if _bmin:
-                counter += f"; minimum size for counter terms ${_bmin.lstrip('$')}"
-        if QA_ANSWER.get(qid, {}).get("type") == "dollars" and a:
-            a = fmt_dollars_answer(a)
-        if qid == "est_valuation" and a:
-            _bn = parse_qa_valuation_billions(a)
-            if _bn is not None:
-                a = fmt_est_val_display(round(_bn, 6))
-        answers[qid] = {"answer": a, "counter": counter, "note": note}
+                counter += f"; minimum size for counter terms {qa_dollar_in_text(_bmin)}"
+        a = qa_display_answer(qid, a)
+        answers[qid] = {"answer": a, "counter": counter, "note": note,
+                        "raw": raw_answers[qid]["answer"]}
         pub = []
         if a: pub.append(a)
         if counter: pub.append(f"counter: {counter}")
@@ -3684,7 +3736,7 @@ def handle_qa_answer_submit(params: dict) -> dict:
         if note: prv.append(f"note (Gracia only): {note}")
         priv_lines.append(f"- {qa_question_text(qid, gp_alloc)}\n    {'; '.join(prv) if prv else '(no response)'}")
         if prv:
-            note_lines.append(f"- {qa_question_text(qid, gp_alloc)} : {'; '.join(prv)}")
+            note_lines.append(f"- {qa_question_text(qid, gp_alloc)} {'; '.join(prv)}")
 
     general_note = (params.get("o_general", "") or "").strip()
     if general_note:
@@ -3782,7 +3834,7 @@ def handle_qa_answer_submit(params: dict) -> dict:
                          '<ul style="margin:0 0 14px 18px;padding:0;font-size:13px;">'
                          + "".join(f"<li>{x}</li>" for x in _h) + '</ul>')
         if qa_skipped:
-            _sk = [f"{qa_question_text(q, gp_alloc)}: {raw}" for q, raw in qa_skipped]
+            _sk = [f"{qa_question_text(q, gp_alloc)} — {raw}" for q, raw in qa_skipped]
             upd_plain += "Not written (couldn't parse):\n" + "\n".join(f"- {x}" for x in _sk) + "\n\n"
             upd_html += ('<div style="font-weight:600;color:#1f2937;font-size:13px;margin-bottom:6px;">Not written (couldn&rsquo;t parse)</div>'
                          '<ul style="margin:0 0 14px 18px;padding:0;font-size:13px;">'
@@ -4014,6 +4066,11 @@ def handle_qa_answer_page(qs: dict) -> dict:
             rows += (
                 '<div style="display:flex;align-items:center;gap:6px;"><span>$</span>'
                 f'<input type="number" step="any" name="a_{qid}" placeholder="e.g. 2000000"></div>'
+            )
+        elif qid == "seller_fee":
+            rows += (
+                '<div style="display:flex;align-items:center;gap:6px;">'
+                f'<input type="text" name="a_{qid}" placeholder="Your answer"><span>%</span></div>'
             )
         elif qid == "est_valuation":
             rows += (
