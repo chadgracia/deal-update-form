@@ -405,7 +405,7 @@ def find_people_by_email(email: str, jwt) -> list:
     if not target:
         return []
     matches = []
-    res = call_pipeline_api("GET", f"/people.json?conditions[email]={urllib.parse.quote(target)}&per_page=25", jwt=jwt)
+    res = call_pipeline_api("GET", f"/people.json?conditions[person_email]={urllib.parse.quote(target)}&per_page=25", jwt=jwt)
     if res["status"] == 200 and isinstance(res["data"], dict):
         for p in res["data"].get("entries") or []:
             slots = {(p.get(f) or "").strip().lower() for f in ("email", "email2", "home_email")}
