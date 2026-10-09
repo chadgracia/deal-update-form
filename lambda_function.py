@@ -2134,12 +2134,15 @@ def unknown_signin_page(email: str) -> dict:
     )
 
 
-def account_setup_page(wait: int) -> dict:
+def account_setup_page(wait: int, email: str = "") -> dict:
     """No Pipeline person yet: refresh every ACCOUNT_WAIT_SECS carrying the
     try count. Sign-in rides on the gg_id cookie; nothing is emailed here."""
     resp = html_response(
         '<h1>Almost there</h1>'
-        '<p class="subtitle" style="margin-top:12px">Your account is being set up — this usually takes a minute.</p>',
+        '<p class="subtitle" style="margin-top:12px">Your account is being set up — this usually takes a minute.</p>'
+        f'<p class="subtitle" style="margin-top:12px">You\'re signed in as <strong>{html.escape(email or "")}</strong>. '
+        'If that isn\'t the email we have on file for you at Rainmaker, please '
+        '<a href="https://trades.graciagroup.com/?signout=1">sign out</a> and sign in with that one instead.</p>',
         head_extra=f'<meta http-equiv="refresh" content="{ACCOUNT_WAIT_SECS};url=?action=new&amp;wait={wait + 1}">')
     resp["headers"]["Cache-Control"] = "no-store"
     return resp
@@ -2154,7 +2157,7 @@ def new_order_for_email(email: str, wait: int = 0) -> dict:
     matches = find_people_by_email(email, jwt)
     if not matches:
         if wait < ACCOUNT_WAIT_TRIES:
-            return account_setup_page(wait)
+            return account_setup_page(wait, email)
         return unknown_signin_page(email)
     person = pick_person(matches)
     return render_new_order_page(int(person["id"]), (person.get("first_name") or "").strip(),
