@@ -78,10 +78,23 @@ QA_TEXT = {
 }
 
 
-def qa_question_text(qid, gp_alloc=False):
+def qa_question_text(qid, gp_alloc=False, answerer_role=None):
     if qid == "est_valuation" and gp_alloc:
         return "What is the round valuation (pre-money)?"
+    if qid == "deadline" and answerer_role == "buyer":
+        return "How long is your buy order open?"
     return QA_TEXT.get(qid, qid)
+
+
+def qa_email_q_line(qid, bid_amount, bid_size, sell_deal, gp_alloc=False, answerer_role=None):
+    """One question line in the Q&A email sent to the answerer."""
+    if qid == "accept_bid" and bid_amount:
+        size_txt = f" for ${bid_size}" if bid_size else ""
+        if sell_deal:
+            return (f"- Would you accept a bid of ${bid_amount}/share (gross){size_txt}?\n"
+                    "    (Gross = what the buyer pays. Your proceeds are net of commission.)")
+        return f"- Would you bid ${bid_amount}/share (gross){size_txt}?"
+    return f"- {qa_question_text(qid, gp_alloc, answerer_role)}"
 
 
 def fmt_dollars_answer(a):
@@ -3298,6 +3311,20 @@ def _record_gp_alloc(record, deal_id):
         return False
 
 
+def _record_answerer_role(record, deal_id):
+    """Answerer role for a Q&A record; legacy records without a stored role infer it from the deal side."""
+    answerer_role = record.get("answerer_role")
+    if answerer_role not in ("buyer", "seller"):
+        try:
+            _jwt = get_jwt()
+            _d = call_pipeline_api("GET", f"/deals/{deal_id}.json", jwt=_jwt).get("data", {})
+            answerer_role = "seller" if is_sell(_d.get("custom_fields", {}) or {}) else "buyer"
+        except Exception as _e:
+            logger.error(f"QA answer role inference failed for {deal_id}: {_e}")
+            answerer_role = "seller"
+    return answerer_role
+
+
 QA_CLASS_IDS = {"Common": 5077831, "Preferred": PREFERRED_CLASS_ID, "Both": 5077912}
 QA_FE_IDS    = {"3(c)(1)": 7200027, "3(c)(7)": 7200028, "Other": 7201486}
 QA_FIELD_NAMES = {
@@ -3551,14 +3578,8 @@ def handle_qa_submit(params: dict) -> dict:
             Body=json.dumps(record).encode(), ContentType="application/json",
         )
 
-        def q_line(qid):
-            if qid == "accept_bid" and bid_amount:
-                size_txt = f" for ${bid_size}" if bid_size else ""
-                if sell_deal:
-                    return f"- Would you accept a bid of ${bid_amount}/share (gross){size_txt}?"
-                return f"- Would you bid ${bid_amount}/share (gross){size_txt}?"
-            return f"- {qa_question_text(qid, gp_alloc)}"
-        q_block = "\n".join(q_line(q) for q in selected)
+        q_block = "\n".join(qa_email_q_line(q, bid_amount, bid_size, sell_deal, gp_alloc, answerer_role)
+                             for q in selected)
 
         answer_link = f"{QA_SELF_URL}?qa=answer&deal_id={deal_id}&set={set_id}&token={make_token(set_id)}"
 
@@ -3696,6 +3717,8 @@ def handle_qa_answer_submit(params: dict) -> dict:
                             else "Done — the deal is cancelled and the questioner has been notified.")
 
     gp_alloc = _record_gp_alloc(record, deal_id) if "est_valuation" in record.get("question_ids", []) else False
+    answerer_role = (_record_answerer_role(record, deal_id) if "deadline" in record.get("question_ids", [])
+                     else record.get("answerer_role"))
     answers, public_lines, priv_lines, note_lines, raw_answers = {}, [], [], [], {}
     for qid in record.get("question_ids", []):
         a       = (params.get(f"a_{qid}", "") or "").strip()
@@ -3734,12 +3757,12 @@ def handle_qa_answer_submit(params: dict) -> dict:
         pub = []
         if a: pub.append(a)
         if counter: pub.append(f"counter: {counter}")
-        public_lines.append(f"- {qa_question_text(qid, gp_alloc)}\n    {'; '.join(pub) if pub else '(no response)'}")
+        public_lines.append(f"- {qa_question_text(qid, gp_alloc, answerer_role)}\n    {'; '.join(pub) if pub else '(no response)'}")
         prv = list(pub)
         if note: prv.append(f"note (Gracia only): {note}")
-        priv_lines.append(f"- {qa_question_text(qid, gp_alloc)}\n    {'; '.join(prv) if prv else '(no response)'}")
+        priv_lines.append(f"- {qa_question_text(qid, gp_alloc, answerer_role)}\n    {'; '.join(prv) if prv else '(no response)'}")
         if prv:
-            note_lines.append(f"- {qa_question_text(qid, gp_alloc)} {'; '.join(prv)}")
+            note_lines.append(f"- {qa_question_text(qid, gp_alloc, answerer_role)} {'; '.join(prv)}")
 
     general_note = (params.get("o_general", "") or "").strip()
     if general_note:
@@ -3837,7 +3860,7 @@ def handle_qa_answer_submit(params: dict) -> dict:
                          '<ul style="margin:0 0 14px 18px;padding:0;font-size:13px;">'
                          + "".join(f"<li>{x}</li>" for x in _h) + '</ul>')
         if qa_skipped:
-            _sk = [f"{qa_question_text(q, gp_alloc)} — {raw}" for q, raw in qa_skipped]
+            _sk = [f"{qa_question_text(q, gp_alloc, answerer_role)} — {raw}" for q, raw in qa_skipped]
             upd_plain += "Not written (couldn't parse):\n" + "\n".join(f"- {x}" for x in _sk) + "\n\n"
             upd_html += ('<div style="font-weight:600;color:#1f2937;font-size:13px;margin-bottom:6px;">Not written (couldn&rsquo;t parse)</div>'
                          '<ul style="margin:0 0 14px 18px;padding:0;font-size:13px;">'
@@ -3869,7 +3892,7 @@ def handle_qa_answer_submit(params: dict) -> dict:
                 parts.append(f'<span style="color:#b45309;">note (Gracia only): {ad["note"]}</span>')
             ans = "; ".join(parts) if parts else "(no response)"
             out += (
-                f'<tr><td style="padding:6px 10px;border-bottom:1px solid #eee;color:#374151;">{qa_question_text(qid, gp_alloc)}</td>'
+                f'<tr><td style="padding:6px 10px;border-bottom:1px solid #eee;color:#374151;">{qa_question_text(qid, gp_alloc, answerer_role)}</td>'
                 f'<td style="padding:6px 10px;border-bottom:1px solid #eee;font-weight:600;color:#111;">{ans}</td></tr>'
             )
         return out
@@ -3952,23 +3975,15 @@ def handle_qa_answer_page(qs: dict) -> dict:
     # Answerer is a buyer  -> a seller is offering (an "offer").
     # Use "counterparty" in prose so labels read naturally either way; only bid vs
     # offer switches by side.
-    answerer_role = record.get("answerer_role")
-    if answerer_role not in ("buyer", "seller"):
-        # Legacy record without a stored role — infer from the deal side.
-        try:
-            _jwt = get_jwt()
-            _d = call_pipeline_api("GET", f"/deals/{deal_id}.json", jwt=_jwt).get("data", {})
-            answerer_role = "seller" if is_sell(_d.get("custom_fields", {}) or {}) else "buyer"
-        except Exception as _e:
-            logger.error(f"QA answer role inference failed for {deal_id}: {_e}")
-            answerer_role = "seller"
+    # Legacy record without a stored role — infer from the deal side.
+    answerer_role = _record_answerer_role(record, deal_id)
     asker_role = "buyer" if answerer_role == "seller" else "seller"
     offer_word = "bid"   if answerer_role == "seller" else "offer"
 
     gp_alloc = _record_gp_alloc(record, deal_id) if "est_valuation" in record.get("question_ids", []) else False
     rows = ""
     for qid in record.get("question_ids", []):
-        qtext = qa_question_text(qid, gp_alloc)
+        qtext = qa_question_text(qid, gp_alloc, answerer_role)
         atype = QA_ANSWER.get(qid, {}).get("type", "text")
         opts  = QA_ANSWER.get(qid, {}).get("options", [])
 

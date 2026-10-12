@@ -208,5 +208,29 @@ class QaDisplaySubmitTests(unittest.TestCase):
         self.assertEqual([p for m, e, p in calls if m == "PUT"], [DISPLAY_SUBMIT_PUT])
 
 
+class QaRoleTextTests(unittest.TestCase):
+    def test_deadline_buyer(self):
+        self.assertEqual(lf.qa_question_text("deadline", answerer_role="buyer"),
+                         "How long is your buy order open?")
+
+    def test_deadline_seller_and_none_unchanged(self):
+        self.assertEqual(lf.qa_question_text("deadline", answerer_role="seller"), lf.QA_TEXT["deadline"])
+        self.assertEqual(lf.qa_question_text("deadline"), lf.QA_TEXT["deadline"])
+        self.assertEqual(lf.QA_TEXT["deadline"], "When is the deadline to commit?")
+
+    def test_sell_accept_bid_gross_reminder(self):
+        line = lf.qa_email_q_line("accept_bid", "10.00", "500,000", True)
+        self.assertEqual(line, "- Would you accept a bid of $10.00/share (gross) for $500,000?\n"
+                               "    (Gross = what the buyer pays. Your proceeds are net of commission.)")
+
+    def test_buy_accept_bid_unchanged(self):
+        self.assertEqual(lf.qa_email_q_line("accept_bid", "10.00", "", False),
+                         "- Would you bid $10.00/share (gross)?")
+
+    def test_email_deadline_line_buyer(self):
+        self.assertEqual(lf.qa_email_q_line("deadline", "", "", False, answerer_role="buyer"),
+                         "- How long is your buy order open?")
+
+
 if __name__ == "__main__":
     unittest.main()
