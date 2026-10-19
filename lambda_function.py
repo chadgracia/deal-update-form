@@ -984,8 +984,9 @@ def html_response(body_html: str, status: int = 200, head_extra: str = "") -> di
 PRICE_OR_VAL_MSG = "Enter either a net price or an estimated valuation."
 ROUND_VAL_MSG = "Enter the round valuation (pre-money), e.g. 150M or 1.5B."
 VAL_OR_UNKNOWN_MSG = "Enter the estimated valuation, or tick Unknown."
-ROUND_VAL_HINT = "The valuation of the round you&rsquo;re syndicating, before the new money."
-EST_VAL_SMALL_MSG = "Enter the full company valuation, e.g. 150,000,000 or 150M"
+ROUND_VAL_HINT = ("The valuation of the round you&rsquo;re syndicating, before the new money. "
+                  "Shorthand works &mdash; type 15B or 250M and we&rsquo;ll convert it.")
+EST_VAL_SMALL_MSG = "That looks too small for a company valuation. Try 15B or 250M — no need to type the full number."
 
 
 def error_page(msg: str) -> dict:
@@ -1317,7 +1318,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
           <label><span id="estValLabel">Est. Valuation</span> <span style="color:#b91c1c">*</span></label>
           <p id="estValGpHint" style="{_grey}display:none">{ROUND_VAL_HINT}</p>
           <p id="estValNoLrHint" style="{_grey}display:none">We don&rsquo;t have a last-round valuation for {html.escape(company)}. If you know the valuation that corresponds to your price, enter it.</p>
-          <input type="text" name="est_valuation" value="{est_val_cur}" placeholder="e.g. 150,000,000 or 150M" autocomplete="off">
+          <input type="text" name="est_valuation" value="{est_val_cur}" placeholder="e.g. 15B or 250M" autocomplete="off">
           <label id="estValUnknownWrap" style="display:flex;align-items:center;gap:6px;font-weight:400;font-size:13px;margin:6px 0 0 0;cursor:pointer">
             <input type="checkbox" name="est_val_unknown" value="1"{" checked" if est_val_unk else ""} style="width:auto;margin:0"> Unknown</label>
           <p id="estValReadout" style="font-size:13px;color:#1a4a8a;font-weight:600;margin:4px 0 0 0;min-height:1em"></p>
