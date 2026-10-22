@@ -180,12 +180,23 @@ FORWARD_STRUCTURE_ID = 5077903
 # New Order structure choices per side: posted value -> (label, STRUCTURE_FIELD ids).
 NEW_ORDER_STRUCTURES = {
     "sell": {"6250090": ("Direct shares",    [DIRECT_STRUCTURE_ID]),
-             "5077906": ("SPV units",        [SPV_STRUCTURE_ID]),
+             "5077906": ("SPV / fund units", [SPV_STRUCTURE_ID]),
              "5077903": ("Forward contract", [FORWARD_STRUCTURE_ID])},
     "buy":  {"6250090": ("Direct", [DIRECT_STRUCTURE_ID]),
              "5077906": ("SPV",    [SPV_STRUCTURE_ID]),
              "6250090,5077906": ("Either", [DIRECT_STRUCTURE_ID, SPV_STRUCTURE_ID])},
 }
+# One-line description under each New Order structure radio.
+NEW_ORDER_STRUCTURE_DESCS = {
+    "sell": {"6250090": "You or your entity are the registered shareholder; the company's own shares transfer to the buyer.",
+             "5077906": "You're selling units or LP interests in a vehicle that holds the shares — including an SPV that sits directly on the cap table, or a new allocation you're syndicating.",
+             "5077903": "A contract to deliver shares later; no transfer today."},
+    "buy":  {"6250090": "You'll own the company's shares in your own name or entity.",
+             "5077906": "You'll buy units in a vehicle that holds the shares (single- or multi-layer).",
+             "6250090,5077906": "Show me both."},
+}
+# Sell deals left as Direct: seller text matching this gets a mismatch flag in Chad's email.
+STRUCTURE_MISMATCH_RE = re.compile(r"\b(spv|special purpose|fund|units?|lp interest|syndicat\w*|allocation|sponsor)\b", re.I)
 # Sell-deal structure override (&as= / structure_override): key -> STRUCTURE_FIELD id.
 STRUCTURE_KEY_IDS = {"direct": DIRECT_STRUCTURE_ID, "spv": SPV_STRUCTURE_ID, "forward": FORWARD_STRUCTURE_ID}
 STRUCTURE_ID_KEYS = {v: k for k, v in STRUCTURE_KEY_IDS.items()}
@@ -1056,8 +1067,12 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
             _ot_line = (f'Order type: <strong>{STRUCTURE_KEY_LABELS.get(stored_st_key, "Not set")}</strong>'
                         f' &middot; <a href="#" style="{_lnk}" onclick="document.getElementById(\'stChange\').style.display=\'inline\';this.style.display=\'none\';return false;">Change</a>'
                         f'<span id="stChange" style="display:none;"> {_alts}</span>')
+        _direct_note = ('<p style="font-size:13px;background:#fff7ed;border:1px solid #fdba74;padding:8px 10px;'
+                        'border-radius:6px;margin:6px 0 0 0;">Selling units in an SPV or fund &mdash; even one on the cap table? '
+                        'Click Change and pick SPV / fund units.</p>'
+                        if (not st_override and stored_st_key == "direct") else "")
         order_type_html = (
-            f'<p style="font-size:14px;color:#374151;margin:12px 0 0 0;">{_ot_line}</p>'
+            f'<p style="font-size:14px;color:#374151;margin:12px 0 0 0;">{_ot_line}</p>{_direct_note}'
             '<p style="font-size:12px;color:#888;margin:2px 0 0 0;">Wrong order type? Click Change &mdash; '
             'please don&rsquo;t create a new order for the same deal.</p>')
     contact      = deal.get("primary_contact") or {}
@@ -2024,14 +2039,16 @@ def render_new_order_page(pid: int, first_name: str, token: str, sso_email: str 
         for cid, cname in sorted(companies.items(), key=lambda kv: kv[1].lower())
     )
 
-    def structure_group(side_key, hint):
+    def structure_group(side_key, hint, lead=""):
         radios = "".join(
-            f'<label style="font-weight:normal;"><input type="radio" name="structure" value="{val}" required> {html.escape(label)}</label>'
+            f'<label style="font-weight:normal;display:block;"><input type="radio" name="structure" value="{val}" required> {html.escape(label)}'
+            f'<span style="display:block;font-size:12px;color:#888;margin:2px 0 0 22px;">{html.escape(NEW_ORDER_STRUCTURE_DESCS[side_key][val])}</span></label>'
             for val, (label, _ids) in NEW_ORDER_STRUCTURES[side_key].items()
         )
+        lead_html = f'<p style="font-size:13px;font-weight:bold;margin:6px 0 4px 0;">{lead}</p>' if lead else ""
         return (f'<div id="st-{side_key}">'
-                f'<p class="st-hint" style="font-size:12px;color:#888;margin:6px 0 4px 0;">{hint}</p>'
-                f'<div style="display:flex;flex-wrap:wrap;gap:8px 24px;margin-top:6px;">{radios}</div></div>')
+                f'<p class="st-hint" style="font-size:12px;color:#888;margin:6px 0 4px 0;">{hint}</p>{lead_html}'
+                f'<div style="display:flex;flex-direction:column;gap:10px;margin-top:6px;">{radios}</div></div>')
 
     sso_hidden = f'<input type="hidden" name="new_email" value="{html.escape(sso_email)}">' if sso_email else ""
     body = f"""
@@ -2054,7 +2071,7 @@ def render_new_order_page(pid: int, first_name: str, token: str, sso_email: str 
 
       <div class="field" id="st-wrap">
         <label>Structure</label>
-        {structure_group("sell", "If selling:")}
+        {structure_group("sell", "If selling:", "Selling SPV units? Choose SPV / fund units even if the SPV is on the cap table.")}
         {structure_group("buy", "If buying:")}
       </div>
 
@@ -3134,6 +3151,12 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
         _st_new = STRUCTURE_KEY_LABELS[structure_override]
         rows.append(("Structure", _st_old, _st_new))
         structure_change_line = f"Seller changed structure: {_st_old} → {_st_new} — please review"
+    structure_mismatch_line = ""
+    if sell and (structure_override or old_structure_key) == "direct":
+        _mm = STRUCTURE_MISMATCH_RE.search(comments)
+        if _mm:
+            structure_mismatch_line = (f"Possible structure mismatch: marked Direct but the seller's text mentions "
+                                       f"'{_mm.group(0)}' — please check.")
     rows.append(("Stage", old_stage, new_stage_name))
 
     # Plain-text fallback (preserve existing line-based format)
@@ -3164,6 +3187,8 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
         email_lines += ["", GROSS_CLEAR_UNVERIFIED_MSG]
     if structure_change_line:
         email_lines += ["", structure_change_line]
+    if structure_mismatch_line:
+        email_lines += ["", structure_mismatch_line]
     if anthropic_hold:
         email_lines += ["", ANTHROPIC_SELL_LINE]
     if comments:
@@ -3240,6 +3265,11 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
         comments_html += (
             '<p style="margin:16px 0 0 0;font-size:13px;color:#b45309;font-weight:600;">'
             f'{html.escape(structure_change_line)}</p>'
+        )
+    if structure_mismatch_line:
+        comments_html += (
+            '<p style="margin:16px 0 0 0;font-size:13px;color:#b45309;font-weight:600;">'
+            f'{html.escape(structure_mismatch_line)}</p>'
         )
     if anthropic_hold:
         comments_html += (
