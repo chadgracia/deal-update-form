@@ -646,6 +646,19 @@ def parse_valuation(raw):
     return round(val, 2) if val >= 1_000_000 else None
 
 
+def valuation_input_error(raw):
+    """Typed valuation -> None when blank or valid, VAL_UNREADABLE_MSG when
+    parse_valuation can't read it at all, EST_VAL_SMALL_MSG when it reads
+    but is under the $1M floor. Mirrored by the form's valErr()."""
+    if raw in (None, "") or not str(raw).strip() or parse_valuation(raw) is not None:
+        return None
+    s = str(raw).strip().lower().replace("$", "").replace(",", "").replace(" ", "")
+    m = re.fullmatch(r"(\d+(?:\.\d*)?|\.\d+)([a-z]*)", s)
+    if not m or m.group(2) not in _VAL_SUFFIX:
+        return VAL_UNREADABLE_MSG
+    return EST_VAL_SMALL_MSG
+
+
 def est_val_dollars(stored):
     """EST_VAL_FIELD value (billions) -> dollars, or None."""
     if stored in (None, ""):
@@ -984,9 +997,10 @@ def html_response(body_html: str, status: int = 200, head_extra: str = "") -> di
 PRICE_OR_VAL_MSG = "Enter either a net price or an estimated valuation."
 ROUND_VAL_MSG = "Enter the round valuation (pre-money), e.g. 150M or 1.5B."
 VAL_OR_UNKNOWN_MSG = "Enter the estimated valuation, or tick Unknown."
-ROUND_VAL_HINT = ("The valuation of the round you&rsquo;re syndicating, before the new money. "
-                  "Shorthand works &mdash; type 15B or 250M and we&rsquo;ll convert it.")
+VAL_SHORTHAND_HINT = "Shorthand works &mdash; type 15B or 250M and we&rsquo;ll convert it."
+ROUND_VAL_HINT = "The valuation of the round you&rsquo;re syndicating, before the new money. " + VAL_SHORTHAND_HINT
 EST_VAL_SMALL_MSG = "That looks too small for a company valuation. Try 15B or 250M — no need to type the full number."
+VAL_UNREADABLE_MSG = "We couldn't read that number. Try 15B or 250M."
 
 
 def error_page(msg: str) -> dict:
@@ -1317,6 +1331,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         <div class="field" id="estValField" style="margin-bottom:0;flex-basis:100%">
           <label><span id="estValLabel">Est. Valuation</span> <span style="color:#b91c1c">*</span></label>
           <p id="estValGpHint" style="{_grey}display:none">{ROUND_VAL_HINT}</p>
+          <p id="estValShortHint" style="{_grey}display:none">{VAL_SHORTHAND_HINT}</p>
           <p id="estValNoLrHint" style="{_grey}display:none">We don&rsquo;t have a last-round valuation for {html.escape(company)}. If you know the valuation that corresponds to your price, enter it.</p>
           <input type="text" name="est_valuation" value="{est_val_cur}" placeholder="e.g. 15B or 250M" autocomplete="off">
           <label id="estValUnknownWrap" style="display:flex;align-items:center;gap:6px;font-weight:400;font-size:13px;margin:6px 0 0 0;cursor:pointer">
@@ -1725,11 +1740,13 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
       var lbl = document.getElementById('estValLabel');
       var gpHint = document.getElementById('estValGpHint');
       var noLrHint = document.getElementById('estValNoLrHint');
+      var shortHint = document.getElementById('estValShortHint');
       var unkWrap = document.getElementById('estValUnknownWrap');
       var implied = document.getElementById('impliedVal');
       var GP = '{SR_NEW_ALLOCATION_ID}';
       var LRV = {json.dumps(lr_basis[0] if lr_basis else None)}, LRP = {json.dumps(lr_basis[1] if lr_basis else None)};
-      var MSG = {{priceOrVal: {json.dumps(PRICE_OR_VAL_MSG)}, round: {json.dumps(ROUND_VAL_MSG)}, valOrUnk: {json.dumps(VAL_OR_UNKNOWN_MSG)}}};
+      var MSG = {{priceOrVal: {json.dumps(PRICE_OR_VAL_MSG)}, round: {json.dumps(ROUND_VAL_MSG)}, valOrUnk: {json.dumps(VAL_OR_UNKNOWN_MSG)},
+                 small: {json.dumps(EST_VAL_SMALL_MSG)}, unreadable: {json.dumps(VAL_UNREADABLE_MSG)}}};
       var SUF = {{'': 1, k: 1e3, thousand: 1e3, m: 1e6, mm: 1e6, mn: 1e6, mil: 1e6, million: 1e6,
                  b: 1e9, bn: 1e9, bil: 1e9, billion: 1e9, t: 1e12, tn: 1e12, trillion: 1e12}};
       function blank(el) {{ return !el || !el.value.trim(); }}
@@ -1775,9 +1792,21 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         v.value = formatted;
         if (document.activeElement === v) v.setSelectionRange(i, i);
       }}
-      function tooSmall() {{
-        var n = parseVal(v ? v.value : '');
-        return n !== null && n < 1e6;
+      // Mirrors valuation_input_error: null (blank/valid), unreadable, or too small.
+      function valErr() {{
+        var raw = v ? v.value : '';
+        if (!String(raw).trim()) return null;
+        var s = String(raw).toLowerCase().replace(/[$,\\s]/g, '');
+        var m = s.match(/^(\\d+(?:\\.\\d*)?|\\.\\d+)([a-z]*)$/);
+        if (!m || !Object.prototype.hasOwnProperty.call(SUF, m[2])) return MSG.unreadable;
+        var n = parseVal(raw);
+        return (n === null || n < 1e6) ? MSG.small : null;
+      }}
+      function showWarn(on) {{
+        if (!warn) return;
+        var e = on ? valErr() : null;
+        if (e) warn.textContent = e;
+        warn.style.display = e ? 'block' : 'none';
       }}
       // Mirrors fmt_implied_val: >= $1B "~$5.2B", below "~$750M".
       function fmtImplied(f) {{
@@ -1798,6 +1827,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         if (lbl) lbl.textContent = gp ? 'Round Valuation (pre-money)' : 'Est. Valuation';
         if (gpHint) gpHint.style.display = gp ? '' : 'none';
         if (noLrHint) noLrHint.style.display = (!gp && LRV === null) ? '' : 'none';
+        if (shortHint) shortHint.style.display = gp ? 'none' : '';
         if (unkWrap) unkWrap.style.display = gp ? 'none' : 'flex';
         if (unk) unk.disabled = hide || gp;
         v.disabled = hide || unkOn();
@@ -1810,7 +1840,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         if (!v) return;
         var n = parseVal(v.value);
         if (out) out.textContent = (n && !v.disabled) ? '= ' + fmtVal(n) : '';
-        if (warn) warn.style.display = (tooSmall() && !v.disabled) ? 'block' : 'none';
+        showWarn(!v.disabled);
         if (err) err.style.display = 'none';
       }}
       function fail(msg, el) {{
@@ -1830,7 +1860,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
         if (s && (s.value === 'cancel' || s.value === 'hold')) return;
         sync();
         var msg = null, focusEl = v;
-        if (!v || v.disabled || !tooSmall()) {{
+        if (!v || v.disabled || !valErr()) {{
           if (isGp()) {{ if (valNum() === null) msg = MSG.round; }}
           else if (blank(p) && valNum() === null) {{ msg = MSG.priceOrVal; focusEl = p; }}
           else if (!valHidden() && valNum() === null && !unkOn()) msg = MSG.valOrUnk;
@@ -1840,11 +1870,11 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
           e.stopImmediatePropagation();
           if (warn) warn.style.display = 'none';
           fail(msg, focusEl);
-        }} else if (v && !v.disabled && tooSmall()) {{
+        }} else if (v && !v.disabled && valErr()) {{
           e.preventDefault();
           e.stopImmediatePropagation();
           if (err) err.style.display = 'none';
-          if (warn) warn.style.display = 'block';
+          showWarn(true);
           v.focus();
         }} else if (err) {{
           err.style.display = 'none';
@@ -2736,7 +2766,7 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
         if submit_action == "confirm":
             val_err = None
             if est_val_raw and est_val_num is None and not val_hidden:
-                val_err = EST_VAL_SMALL_MSG
+                val_err = valuation_input_error(est_val_raw) or EST_VAL_SMALL_MSG
             elif is_gp and est_val_num is None:
                 val_err = ROUND_VAL_MSG
             elif not is_gp and not net_val and est_val_num is None:
