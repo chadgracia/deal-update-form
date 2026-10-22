@@ -188,7 +188,7 @@ NEW_ORDER_STRUCTURES = {
 }
 # One-line description under each New Order structure radio.
 NEW_ORDER_STRUCTURE_DESCS = {
-    "sell": {"6250090": "You or your entity are the registered shareholder; the company's own shares transfer to the buyer.",
+    "sell": {"6250090": "You are the registered shareholder with permission from the company to sell your shares to a new buyer, who will join the cap table of the company under their own name.",
              "5077906": "You're selling units or LP interests in a vehicle that holds the shares — including an SPV that sits directly on the cap table, or a new allocation you're syndicating.",
              "5077903": "A contract to deliver shares later; no transfer today."},
     "buy":  {"6250090": "You'll own the company's shares in your own name or entity.",
@@ -2041,8 +2041,8 @@ def render_new_order_page(pid: int, first_name: str, token: str, sso_email: str 
 
     def structure_group(side_key, hint, lead=""):
         radios = "".join(
-            f'<label style="font-weight:normal;display:block;"><input type="radio" name="structure" value="{val}" required> {html.escape(label)}'
-            f'<span style="display:block;font-size:12px;color:#888;margin:2px 0 0 22px;">{html.escape(NEW_ORDER_STRUCTURE_DESCS[side_key][val])}</span></label>'
+            f'<label style="font-weight:normal;display:block;"><input type="radio" name="structure" value="{val}" required> {html.escape(label)}<br>'
+            f'<span style="display:inline-block;font-size:12px;color:#888;margin:2px 0 0 22px;">{html.escape(NEW_ORDER_STRUCTURE_DESCS[side_key][val])}</span></label>'
             for val, (label, _ids) in NEW_ORDER_STRUCTURES[side_key].items()
         )
         lead_html = f'<p style="font-size:13px;font-weight:bold;margin:6px 0 4px 0;">{lead}</p>' if lead else ""
