@@ -525,6 +525,25 @@ def call_pipeline_api(method, endpoint, payload=None, jwt=None):
         return {"status": 500, "data": str(e)}
 
 
+def publish_fresh_deal(deal_id, jwt):
+    """Write the just-updated deal to s3://full-pipeline-cache/deal-fresh/{id}.json so Blockbook
+    (syndicate-dash) can overlay it before the hourly deals.json snapshot catches up.
+    Best effort: one attempt, never raises, never affects the response."""
+    try:
+        res = call_pipeline_api("GET", f"/deals/{deal_id}.json", jwt=jwt)
+        deal = res.get("data")
+        if res.get("status") != 200 or not isinstance(deal, dict) or not deal.get("id"):
+            print(f"deal-fresh: skipped deal {deal_id}: GET returned {res.get('status')}")
+            return
+        boto3.client("s3").put_object(
+            Bucket="full-pipeline-cache", Key=f"deal-fresh/{deal_id}.json",
+            ContentType="application/json",
+            Body=json.dumps({"fetched_at": datetime.now(timezone.utc).isoformat(), "deal": deal}),
+        )
+    except Exception as e:
+        print(f"deal-fresh: failed for deal {deal_id}: {e}")
+
+
 def send_email(to_address: str, subject: str, body: str, html: str = None):
     ses = boto3.client("ses", region_name="us-east-1")
     body_block = {"Text": {"Data": body}}
@@ -2492,6 +2511,7 @@ def handle_new_order_create(params: dict, event: dict = None) -> dict:
         logger.error(f"new-order create failed: {create_result}")
         return error_page("Sorry — we could not create your order. Please reply to our email and we will set it up for you.")
     new_deal_id = created["id"]
+    publish_fresh_deal(new_deal_id, jwt_new)
 
     try:
         s3_lock.put_object(
@@ -2632,6 +2652,7 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
                                    {"deal": {"deal_stage_id": 2094373}}, jwt=jwt)
         if result["status"] != 200:
             return error_page("Could not put the deal on hold. Please try again or contact us.")
+        publish_fresh_deal(deal_id, jwt)
         send_email(
             CHAD_EMAIL,
             f"Deal put on HOLD via update form: deal {deal_id}",
@@ -2660,6 +2681,7 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
             logger.error(f"Cancel PUT failed for deal {deal_id}: {result['status']} {str(result['data'])[:300]}")
             return error_page(f"Could not cancel the deal (Pipeline error {result['status']}). "
                               "Nothing was changed. Please try again or contact us.")
+        publish_fresh_deal(deal_id, jwt)
         data = result["data"] if isinstance(result["data"], dict) else {}
         deal_name = ((data.get("deal") if isinstance(data.get("deal"), dict) else data).get("name") or "").strip()
         if not deal_name:
@@ -2938,6 +2960,7 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
             html=fail_html,
         )
         return error_page("We couldn't save your update right now. Chad has been notified.")
+    publish_fresh_deal(deal_id, jwt)
 
     # Confirm the stale sell gross actually cleared; never blocks the seller.
     # Pipeline returns the cleared value as the string "0.0".
@@ -3708,8 +3731,10 @@ def handle_qa_answer_submit(params: dict) -> dict:
     if (params.get("optout") or "").strip() == "1":
         try:
             jwt = get_jwt()
-            call_pipeline_api("PUT", f"/deals/{deal_id}.json",
-                              {"deal": {"custom_fields": {"custom_label_4001285": 7187011}}}, jwt=jwt)
+            _res = call_pipeline_api("PUT", f"/deals/{deal_id}.json",
+                                     {"deal": {"custom_fields": {"custom_label_4001285": 7187011}}}, jwt=jwt)
+            if 200 <= (_res.get("status") or 0) < 300:
+                publish_fresh_deal(deal_id, jwt)
         except Exception as e:
             logger.error(f"opt-out: failed to set Messaging=Disallow for {deal_id}: {e}")
         record["status"] = "answered"
@@ -3852,6 +3877,7 @@ def handle_qa_answer_submit(params: dict) -> dict:
             _res = call_pipeline_api("PUT", f"/deals/{deal_id}.json",
                                      {"deal": {"custom_fields": qa_custom}}, jwt=jwt)
             if 200 <= (_res.get("status") or 0) < 300:
+                publish_fresh_deal(deal_id, jwt)
                 pipeline_updates = [
                     {"field": f, "name": QA_FIELD_NAMES.get(f, f), "old": parse_cf(cf, f), "new": v}
                     for f, v in qa_custom.items()
