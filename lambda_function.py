@@ -2032,13 +2032,40 @@ def success_page(message: str, subtitle: str = None, dest: str = None) -> dict:
 
 # ── New Order pages ───────────────────────────────────────────────────────────
 
-def load_new_order_companies() -> dict:
-    """{company id: name} from the deals.json snapshot (the New Order dropdown list)."""
+NEW_ORDER_CACHE_TTL = 15 * 60
+_new_order_cache = {"at": 0.0, "companies": None}
+
+# Person custom fields whose dropdown options are the traded issuers.
+NEW_ORDER_INTEREST_LABEL_IDS = (3322093, 3759156)   # Buy Interest, Sell Interest
+# Company custom fields that only issuers carry (investor firms leave them blank).
+NEW_ORDER_ISSUER_FIELDS = (
+    "custom_label_3999575",  # Hiive Price
+    "custom_label_3790429",  # LR Val
+    "custom_label_3064363",  # LR PPS
+    "custom_label_3826032",  # LR Date
+    "custom_label_3999603",  # Catalyst
+)
+
+
+def _new_order_name_key(name) -> str:
+    return " ".join(str(name or "").split()).lower()
+
+
+def _new_order_has_value(v) -> bool:
+    if isinstance(v, str):
+        return bool(v.strip())
+    return v not in (None, [], {}, 0)
+
+
+def _new_order_s3_json(key):
+    obj = boto3.client("s3").get_object(Bucket="full-pipeline-cache", Key=key)
+    return json.loads(obj["Body"].read())
+
+
+def _new_order_deal_companies() -> dict:
     companies = {}
     try:
-        s3  = boto3.client("s3")
-        obj = s3.get_object(Bucket="full-pipeline-cache", Key="deals.json")
-        data = json.loads(obj["Body"].read())
+        data = _new_order_s3_json("deals.json")
         deals_list = data if isinstance(data, list) else (data.get("deals") or [])
         for d in deals_list:
             c = d.get("company") or {}
@@ -2048,6 +2075,106 @@ def load_new_order_companies() -> dict:
     except Exception as e:
         logger.warning(f"new-order: failed to load deals.json: {e}")
     return companies
+
+
+def _new_order_interest_names() -> set:
+    names = set()
+    try:
+        jwt = get_jwt()
+    except Exception as e:
+        logger.warning(f"new-order: failed to load JWT for interest labels: {e}")
+        return names
+    for label_id in NEW_ORDER_INTEREST_LABEL_IDS:
+        try:
+            resp = call_pipeline_api("GET", f"/admin/person_custom_field_labels/{label_id}.json", jwt=jwt)
+            data = resp.get("data")
+            if resp.get("status") != 200 or not isinstance(data, dict):
+                raise ValueError(f"status {resp.get('status')}: {str(data)[:200]}")
+            entries = (data.get("entry") or data).get("custom_field_label_dropdown_entries", [])
+            for e in entries:
+                n = (e.get("name") or "").strip()
+                if n:
+                    names.add(n)
+        except Exception as e:
+            logger.warning(f"new-order: failed to load interest label {label_id}: {e}")
+    return names
+
+
+def _new_order_restricted_ids():
+    try:
+        data = _new_order_s3_json("restricted-issuers.json")
+        return {int(c["id"]) for c in (data.get("companies") or []) if c.get("id")}
+    except Exception as e:
+        logger.warning(f"new-order: restricted-issuers.json unavailable, filter skipped: {e}")
+        return None
+
+
+def _new_order_drop_restricted(companies: dict) -> dict:
+    restricted = _new_order_restricted_ids()
+    if not restricted:
+        return companies
+    return {cid: n for cid, n in companies.items() if cid not in restricted}
+
+
+def load_new_order_companies() -> dict:
+    """{company id: name} for the New Order dropdown: companies on a deal in deals.json, plus
+    companies.json records matching a Buy/Sell Interest option or carrying an issuer field,
+    minus restricted-issuers.json. Cached per warm container for NEW_ORDER_CACHE_TTL."""
+    now = datetime.now(timezone.utc).timestamp()
+    cached = _new_order_cache["companies"]
+    if cached and now - _new_order_cache["at"] < NEW_ORDER_CACHE_TTL:
+        return dict(cached)
+
+    companies = {}
+    for cid, n in _new_order_deal_companies().items():
+        try:
+            companies[int(cid)] = n
+        except (TypeError, ValueError):
+            continue
+
+    try:
+        records = _new_order_s3_json("companies.json").get("companies") or []
+    except Exception as e:
+        logger.warning(f"new-order: failed to load companies.json, using deals.json only: {e}")
+        return _new_order_drop_restricted(companies)
+
+    by_id, by_name = {}, {}
+    for c in records:
+        try:
+            cid = int(c.get("id"))
+        except (TypeError, ValueError):
+            continue
+        name = (c.get("name") or "").strip()
+        if not name:
+            continue
+        by_id[cid] = (name, c.get("custom_fields") or {})
+        by_name.setdefault(_new_order_name_key(name), cid)
+
+    include = set(companies)
+    unmatched = 0
+    for n in _new_order_interest_names():
+        cid = by_name.get(_new_order_name_key(n))
+        if cid is None:
+            unmatched += 1
+        else:
+            include.add(cid)
+    if unmatched:
+        logger.warning(f"new-order: {unmatched} interest option name(s) had no companies.json match")
+
+    for cid, (_, cf) in by_id.items():
+        if any(_new_order_has_value(cf.get(k)) for k in NEW_ORDER_ISSUER_FIELDS):
+            include.add(cid)
+
+    result = {}
+    for cid in include:
+        name = by_id[cid][0] if cid in by_id else companies.get(cid, "")
+        if name:
+            result[cid] = name
+    result = _new_order_drop_restricted(result)
+
+    if result:
+        _new_order_cache.update(at=now, companies=dict(result))
+    return result
 
 
 def render_new_order_page(pid: int, first_name: str, token: str, sso_email: str = "") -> dict:
