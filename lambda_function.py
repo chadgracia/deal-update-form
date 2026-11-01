@@ -150,6 +150,7 @@ NEXUS_FIELD       = "custom_label_3751449"
 NEXUS_DIRECT_ID   = 6460632
 CP_DIRECT_FIELD   = "custom_label_3065662"
 CP_DIRECT_YES_ID  = 5080984
+REVENUE_TYPE_COMMISSION_ID = 1027   # Pipeline native revenue_type_id for "Commission"
 DEADLINE_FIELD    = "custom_label_4006402"
 SELLER_FEE_FIELD  = "custom_label_3940560"
 EST_VAL_FIELD     = "custom_label_4009563"  # stored in billions, like COMPANY_VAL_FIELD
@@ -2624,6 +2625,7 @@ def handle_new_order_create(params: dict, event: dict = None) -> dict:
         "name": new_deal_name,
         "primary_contact_id": new_pid,
         "deal_stage_id": HOLD_STAGE_ID if anthropic_hold else INQUIRY_STAGE_ID,
+        "revenue_type_id": REVENUE_TYPE_COMMISSION_ID,
         "custom_fields": {DEAL_TYPE_FIELD: [new_type_id], STRUCTURE_FIELD: structure_ids,
                           NEXUS_FIELD: [NEXUS_DIRECT_ID], CP_DIRECT_FIELD: [CP_DIRECT_YES_ID]},
     }
