@@ -152,6 +152,7 @@ CP_DIRECT_FIELD   = "custom_label_3065662"
 CP_DIRECT_YES_ID  = 5080984
 REVENUE_TYPE_COMMISSION_ID = 1027   # Pipeline native revenue_type_id for "Commission"
 DEADLINE_FIELD    = "custom_label_4006402"
+LAST_CONFIRMED_FIELD = "custom_label_4012491"  # date: last time the client confirmed the deal is live (write YYYY-MM-DD)
 SELLER_FEE_FIELD  = "custom_label_3940560"
 EST_VAL_FIELD     = "custom_label_4009563"  # stored in billions, like COMPANY_VAL_FIELD
 SERIES_FIELD      = "custom_label_3064333"
@@ -545,6 +546,25 @@ def publish_fresh_deal(deal_id, jwt):
         print(f"deal-fresh: failed for deal {deal_id}: {e}")
 
 
+def confirmed_today() -> str:
+    """LAST_CONFIRMED_FIELD write value: today's UTC date as YYYY-MM-DD."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def put_deal_confirmed(deal_id, deal_payload: dict, jwt):
+    """PUT deal_payload with LAST_CONFIRMED_FIELD = today added to its custom
+    fields (same PUT). If that PUT fails, log it and retry once without the
+    field, so the stamp can never block or fail the client's save."""
+    stamped = dict(deal_payload)
+    stamped["custom_fields"] = {**(deal_payload.get("custom_fields") or {}), LAST_CONFIRMED_FIELD: confirmed_today()}
+    result = call_pipeline_api("PUT", f"/deals/{deal_id}.json", {"deal": stamped}, jwt=jwt)
+    if result["status"] == 200:
+        return result
+    logger.error(f"last-confirmed: PUT with {LAST_CONFIRMED_FIELD} failed for deal {deal_id}: "
+                 f"{result['status']} {str(result['data'])[:300]}; retrying without it")
+    return call_pipeline_api("PUT", f"/deals/{deal_id}.json", {"deal": deal_payload}, jwt=jwt)
+
+
 def send_email(to_address: str, subject: str, body: str, html: str = None):
     ses = boto3.client("ses", region_name="us-east-1")
     body_block = {"Text": {"Data": body}}
@@ -885,6 +905,16 @@ def html_response(body_html: str, status: int = 200, head_extra: str = "") -> di
       background: #fdecec;
       color: #a03030;
       border: 1px solid #e0a8a8;
+      padding: 13px;
+      border-radius: 8px;
+      font-size: 15px;
+      cursor: pointer;
+    }}
+    .btn-secondary {{
+      flex: 1;
+      background: #fff;
+      color: #1a1a1a;
+      border: 1px solid #ccc;
       padding: 13px;
       border-radius: 8px;
       font-size: 15px;
@@ -1647,7 +1677,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
       form.addEventListener('submit', function(e) {{
         if (bypass) return;
         var s = e.submitter;
-        if (s && (s.value === 'cancel' || s.value === 'hold')) return;
+        if (s && (s.value === 'cancel' || s.value === 'hold' || s.value === 'still_active')) return;
         // SPV sell orders: a valuation stands in for a price, so no nudge.
         var valInput = form.querySelector('[name="est_valuation"]');
         if (valInput && valInput.value.trim()) return;
@@ -1892,7 +1922,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
       }}
       form.addEventListener('submit', function(e) {{
         var s = e.submitter;
-        if (s && (s.value === 'cancel' || s.value === 'hold')) return;
+        if (s && (s.value === 'cancel' || s.value === 'hold' || s.value === 'still_active')) return;
         sync();
         var msg = null, focusEl = v;
         if (!v || v.disabled || !valErr()) {{
@@ -1984,6 +2014,9 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
       <div class="btn-row">
         <button type="submit" name="submit_action" value="confirm" class="btn-primary">✓ Confirm / Update</button>
         <button type="submit" name="submit_action" value="cancel" class="btn-cancel" formnovalidate>✕ Cancel — Remove Deal</button>
+      </div>
+      <div class="btn-row" style="margin-top:12px">
+        <button type="submit" name="submit_action" value="still_active" class="btn-secondary" formnovalidate>Still active — no changes</button>
       </div>
     </form>
 
@@ -2627,7 +2660,8 @@ def handle_new_order_create(params: dict, event: dict = None) -> dict:
         "deal_stage_id": HOLD_STAGE_ID if anthropic_hold else INQUIRY_STAGE_ID,
         "revenue_type_id": REVENUE_TYPE_COMMISSION_ID,
         "custom_fields": {DEAL_TYPE_FIELD: [new_type_id], STRUCTURE_FIELD: structure_ids,
-                          NEXUS_FIELD: [NEXUS_DIRECT_ID], CP_DIRECT_FIELD: [CP_DIRECT_YES_ID]},
+                          NEXUS_FIELD: [NEXUS_DIRECT_ID], CP_DIRECT_FIELD: [CP_DIRECT_YES_ID],
+                          LAST_CONFIRMED_FIELD: confirmed_today()},
     }
     if new_cid:
         deal_body["company_id"] = new_cid
@@ -2635,6 +2669,12 @@ def handle_new_order_create(params: dict, event: dict = None) -> dict:
         deal_body["user_id"] = new_owner_id
 
     create_result = call_pipeline_api("POST", "/deals.json", {"deal": deal_body}, jwt=jwt_new)
+    if create_result["status"] in (400, 422):
+        # Validation rejection (nothing created): never let the last-confirmed stamp block the order.
+        logger.error(f"last-confirmed: create with {LAST_CONFIRMED_FIELD} rejected: "
+                     f"{create_result['status']} {str(create_result['data'])[:300]}; retrying without it")
+        deal_body["custom_fields"].pop(LAST_CONFIRMED_FIELD, None)
+        create_result = call_pipeline_api("POST", "/deals.json", {"deal": deal_body}, jwt=jwt_new)
     created = create_result.get("data") if isinstance(create_result.get("data"), dict) else {}
     if create_result["status"] not in (200, 201) or not created.get("id"):
         logger.error(f"new-order create failed: {create_result}")
@@ -2777,8 +2817,7 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
 
     if submit_action == "hold":
         deal_url = f"https://app.pipelinecrm.com/deals/{deal_id}"
-        result = call_pipeline_api("PUT", f"/deals/{deal_id}.json",
-                                   {"deal": {"deal_stage_id": 2094373}}, jwt=jwt)
+        result = put_deal_confirmed(deal_id, {"deal_stage_id": 2094373}, jwt)
         if result["status"] != 200:
             return error_page("Could not put the deal on hold. Please try again or contact us.")
         publish_fresh_deal(deal_id, jwt)
@@ -2796,6 +2835,36 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
             )
         )
         return success_page("Deal put on hold")
+
+    if submit_action == "still_active":
+        # "Still active — no changes": POST only (handle_post), signed link
+        # token required; writes only LAST_CONFIRMED_FIELD = today.
+        if not verify_deal_token(deal_id, params.get("token", "")):
+            return error_page("Invalid or expired link.")
+        result = call_pipeline_api("PUT", f"/deals/{deal_id}.json",
+                                   {"deal": {"custom_fields": {LAST_CONFIRMED_FIELD: confirmed_today()}}}, jwt=jwt)
+        write_ok = result["status"] == 200
+        if write_ok:
+            publish_fresh_deal(deal_id, jwt)
+        else:
+            logger.error(f"last-confirmed: still-active PUT failed for deal {deal_id}: "
+                         f"{result['status']} {str(result['data'])[:300]}")
+        data = result["data"] if isinstance(result["data"], dict) else {}
+        deal_name = ((data.get("deal") if isinstance(data.get("deal"), dict) else data).get("name") or "").strip()
+        if not deal_name:
+            got = call_pipeline_api("GET", f"/deals/{deal_id}.json", jwt=jwt)
+            if got["status"] == 200 and isinstance(got["data"], dict):
+                deal_name = (got["data"].get("name") or "").strip()
+        deal_label = deal_name or f"Deal #{deal_id}"
+        line = f"{deal_label} confirmed active by client"
+        if not write_ok:
+            line += f" (Pipeline write FAILED, HTTP {result['status']})"
+        try:
+            send_email(CHAD_EMAIL, line, line, html=email_html(f'<p style="margin:0;">{html.escape(line)}</p>'))
+        except Exception as e:
+            logger.error(f"Still-active email failed for deal {deal_id}: {e}")
+        return success_page("Thanks — your order is confirmed as active.",
+                            subtitle="No changes were made to your order.")
 
     if submit_action == "cancel":
         # Cancel really cancels: PUT the stage to Obsolete first; only on
@@ -3051,8 +3120,7 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
     elif eff_shares and calc_gross:
         custom[MAX_SIZE_FIELD] = round(eff_shares * calc_gross, 2)
 
-    payload = {"deal": {"deal_stage_id": new_stage, "custom_fields": custom}}
-    result  = call_pipeline_api("PUT", f"/deals/{deal_id}.json", payload, jwt=jwt)
+    result  = put_deal_confirmed(deal_id, {"deal_stage_id": new_stage, "custom_fields": custom}, jwt)
     logger.info(f"Pipeline update: {result['status']}")
 
     if result["status"] != 200:
