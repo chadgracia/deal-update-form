@@ -42,7 +42,7 @@ class LastConfirmedTests(unittest.TestCase):
         self.assertEqual(self.calls[1][2], {"deal": {"deal_stage_id": 1}})
 
     def test_hold_sets_field(self):
-        self._post("deal_id=9&submit_action=hold")
+        self._post("deal_id=9&submit_action=hold", {"token": lf.make_deal_token(9)})
         self.assertEqual(self.calls[0][2]["deal"]["custom_fields"], {F: "2026-11-02"})
 
     def test_cancel_does_not_set_field(self):

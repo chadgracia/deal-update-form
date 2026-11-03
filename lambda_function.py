@@ -1959,7 +1959,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
     {val_html}
 
     <form method="POST">
-      <input type="hidden" name="deal_id" value="{deal_id}">{f'<input type="hidden" name="structure_override" value="{st_override}">' if st_override else ''}
+      <input type="hidden" name="deal_id" value="{deal_id}"><input type="hidden" name="token" value="{make_deal_token(deal_id)}">{f'<input type="hidden" name="structure_override" value="{st_override}">' if st_override else ''}
 
       <div style="display:flex;gap:12px;margin-bottom:20px;">
         <button type="submit" name="submit_action" value="hold" class="btn-hold" formnovalidate
@@ -2812,6 +2812,12 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
         deal_id = int(deal_id_str)
     except (ValueError, TypeError):
         return error_page("Invalid submission.")
+
+    # Every deal write below (hold, the default confirm/update save, still
+    # active, cancel) needs the signed deal-link token -- deal IDs are public.
+    # It rides in the form's query string and in a hidden field.
+    if not verify_deal_token(deal_id, params.get("token", "")):
+        return error_page("Invalid or expired link.")
 
     jwt = get_jwt()
 
