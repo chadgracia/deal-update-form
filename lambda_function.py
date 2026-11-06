@@ -23,7 +23,7 @@ import hashlib
 import re
 import base64
 import boto3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -75,7 +75,11 @@ QA_TEXT = {
     "max_ticket":    "What is the maximum ticket you can take?",
     "min_ticket":    "What is the minimum ticket?",
     "est_valuation": "What is the estimated valuation?",
+    "still_active":  "Is this order still active?",
 }
+STILL_ACTIVE_YES = "Yes, still active"
+STILL_ACTIVE_NO  = "No longer available"
+STILL_ACTIVE_THROTTLE_DAYS = 7
 
 
 def qa_question_text(qid, gp_alloc=False, answerer_role=None):
@@ -129,6 +133,7 @@ QA_ANSWER = {
     "max_ticket":    {"type": "dollars"},
     "min_ticket":    {"type": "dollars"},
     "est_valuation": {"type": "text"},
+    "still_active":  {"type": "choice", "options": [STILL_ACTIVE_YES, STILL_ACTIVE_NO]},
 }
 TRADES_URL          = "https://trades.graciagroup.com"
 PIPELINE_JWT_BUCKET = "pipeline-token"
@@ -3783,6 +3788,34 @@ def qa_field_display(field, val):
     return str(val)
 
 
+def still_active_recently_sent(s3, deal_id) -> bool:
+    """True if a still_active question went out for deal_id within STILL_ACTIVE_THROTTLE_DAYS
+    (s3://QA_BUCKET/still-active/<deal_id>.json). Missing/unreadable record -> False."""
+    try:
+        obj = s3.get_object(Bucket=QA_BUCKET, Key=f"still-active/{deal_id}.json")
+        sent_at = datetime.fromisoformat(json.loads(obj["Body"].read().decode())["sent_at"])
+    except Exception as e:
+        if "NoSuchKey" not in str(e):
+            logger.error(f"still-active: throttle read failed for {deal_id}: {e}")
+        return False
+    if sent_at.tzinfo is None:
+        sent_at = sent_at.replace(tzinfo=timezone.utc)
+    return _utcnow() - sent_at < timedelta(days=STILL_ACTIVE_THROTTLE_DAYS)
+
+
+def record_still_active_sent(s3, deal_id):
+    try:
+        s3.put_object(Bucket=QA_BUCKET, Key=f"still-active/{deal_id}.json",
+                      Body=json.dumps({"sent_at": _utcnow().isoformat()}).encode(),
+                      ContentType="application/json")
+    except Exception as e:
+        logger.error(f"still-active: throttle write failed for {deal_id}: {e}")
+
+
+STILL_ACTIVE_THROTTLE_MSG = ("We've already asked about this order recently. "
+                             "You'll hear from us as soon as they reply.")
+
+
 def handle_qa_submit(params: dict) -> dict:
     """Buyer submitted a batch of questions from the public deal page. Stores the set
     in S3 keyed by an opaque set_id (so the buyer's email never rides in the seller's
@@ -3836,6 +3869,20 @@ def handle_qa_submit(params: dict) -> dict:
     asker_role    = "buyer"  if sell_deal else "seller"
     answerer_role = "seller" if sell_deal else "buyer"
     gp_alloc      = seller_role_id(parse_cf(cf, SELLER_ROLE_FIELD)) == SR_NEW_ALLOCATION_ID
+
+    # still_active throttle: one ask per deal per STILL_ACTIVE_THROTTLE_DAYS. Drop it from
+    # this send; other questions still go out.
+    still_active_suppressed = False
+    if "still_active" in selected and still_active_recently_sent(s3, deal_id):
+        selected = [q for q in selected if q != "still_active"]
+        still_active_suppressed = True
+        try:
+            _line = f"{deal_name}: repeat still-active request suppressed"
+            send_email(CHAD_EMAIL, _line, _line)
+        except Exception as e:
+            logger.error(f"still-active: Chad suppression notice failed for {deal_id}: {e}")
+        if not selected:
+            return success_page(STILL_ACTIVE_THROTTLE_MSG)
 
     seller_email = ""
     seller_first = ""
@@ -3900,6 +3947,10 @@ def handle_qa_submit(params: dict) -> dict:
             logger.error(f"Failed to release send-once lock {lock_key}: {del_e}")
         raise
 
+    if "still_active" in selected and seller_email:
+        record_still_active_sent(s3, deal_id)
+    if still_active_suppressed:
+        return success_page("Your questions have been sent to the counterparty.", STILL_ACTIVE_THROTTLE_MSG)
     return success_page("Your questions have been sent to the counterparty.")
 
 
@@ -3962,6 +4013,11 @@ def handle_qa_answer_submit(params: dict) -> dict:
     # Consume the link, notify the questioner and Chad. The Pipeline stage is NOT
     # changed automatically — Chad updates it from the notification email.
     deal_action = (params.get("deal_action") or "").strip()
+    # still_active answered "No longer available" -> exactly the cancel path.
+    still_active_no = ("still_active" in record.get("question_ids", [])
+                       and (params.get("a_still_active") or "").strip() == STILL_ACTIVE_NO)
+    if still_active_no and deal_action not in ("hold", "cancel"):
+        deal_action = "cancel"
     if deal_action in ("hold", "cancel"):
         record["status"] = "answered"
         record["deal_action"] = deal_action
@@ -3993,9 +4049,12 @@ def handle_qa_answer_submit(params: dict) -> dict:
                      "contact Chad Gracia at cgracia@rainmakersecurities.com.")
             send_email(buyer_email, asker_subject, plain, html=email_html(inner))
         pipeline_link = f"https://app.pipelinecrm.com/deals/{deal_id}"
+        chosen_label = ("This deal is on hold" if deal_action == "hold"
+                        else STILL_ACTIVE_NO if still_active_no and params.get("deal_action") != "cancel"
+                        else "Cancel this deal")
         chad_plain = (
             f"The counterparty on {deal_name} (deal {deal_id}) responded to the Q&A request by choosing "
-            f"'{'This deal is on hold' if deal_action == 'hold' else 'Cancel this deal'}'.\n\n"
+            f"'{chosen_label}'.\n\n"
             f"Questioner: {buyer_name or '—'} <{buyer_email or '—'}>\nAnswerer: <{seller_email or '—'}>\n"
             + (f"\nPrivate note: {general_note}\n" if general_note else "")
             + f"\nThe questioner was notified. The Pipeline stage was NOT changed — update it here:\n{pipeline_link}"
@@ -4099,6 +4158,28 @@ def handle_qa_answer_submit(params: dict) -> dict:
         if qa_custom and not pipeline_updates:
             pipeline_write_failed = True
 
+    # still_active "Yes": write only LAST_CONFIRMED_FIELD = today. A failure is logged and
+    # flagged in Chad's email; it never blocks the answer flow.
+    still_active_yes = (answers.get("still_active") or {}).get("raw") == STILL_ACTIVE_YES
+    lc_failed_status = None
+    if still_active_yes:
+        try:
+            jwt = jwt or get_jwt()
+            _lres = call_pipeline_api("PUT", f"/deals/{deal_id}.json",
+                                      {"deal": {"custom_fields": {LAST_CONFIRMED_FIELD: confirmed_today()}}}, jwt=jwt)
+            if 200 <= (_lres.get("status") or 0) < 300:
+                publish_fresh_deal(deal_id, jwt)
+            else:
+                lc_failed_status = _lres.get("status")
+                logger.error(f"last-confirmed: still_active write failed for {deal_id}: "
+                             f"{_lres.get('status')} {str(_lres.get('data'))[:300]}")
+        except Exception as e:
+            lc_failed_status = "n/a"
+            logger.error(f"last-confirmed: still_active write failed for {deal_id}: {e}")
+    lc_fail_line = (f"(Last Confirmed write FAILED, HTTP {lc_failed_status})"
+                    if lc_failed_status is not None else "")
+    still_active_msg = "The counterparty confirmed this order is still active."
+
     # Internal Pipeline note (never the public deal summary).
     _fields_txt = ", ".join(
         f"{u['name']}: {qa_field_display(u['field'], u['old'])} -> {qa_field_display(u['field'], u['new'])}"
@@ -4192,13 +4273,16 @@ def handle_qa_answer_submit(params: dict) -> dict:
         inner = (
             f'<h2 style="margin:0 0 4px 0;font-size:18px;color:#111;">{deal_name}</h2>'
             '<p style="margin:0 0 16px 0;color:#4b5563;font-size:14px;">The counterparty replied to your questions:</p>'
+            + (f'<p style="margin:0 0 16px 0;color:#111;font-size:14px;font-weight:600;">{still_active_msg}</p>'
+               if still_active_yes else '') +
             f'<table style="border-collapse:collapse;width:100%;margin-bottom:18px;font-size:14px;">{qa_rows(False)}</table>'
             f'{details_html}'
             f'<a href="{deal_link}" style="display:inline-block;padding:10px 18px;background:#1a1a1a;color:#ffffff;text-decoration:none;border-radius:6px;font-size:14px;">View the deal</a>'
             '<p style="margin:18px 0 0 0;color:#4b5563;font-size:13px;">To move forward, click <b>Bid</b> on the deal page to close, or contact Chad Gracia at '
             '<a href="mailto:cgracia@rainmakersecurities.com">cgracia@rainmakersecurities.com</a>.</p>'
         )
-        plain = (f"{hello}\n\nThe counterparty replied on {deal_name}:\n\n" + "\n".join(public_lines)
+        plain = (f"{hello}\n\nThe counterparty replied on {deal_name}:\n\n"
+                 + (f"{still_active_msg}\n\n" if still_active_yes else "") + "\n".join(public_lines)
                  + f"\n\nView the deal: {deal_link}\n\nTo move forward, click Bid on the deal page to close, "
                    "or contact Chad Gracia at cgracia@rainmakersecurities.com.")
         send_email(buyer_email, f"Answers on {deal_name}", plain, html=email_html(inner))
@@ -4209,6 +4293,8 @@ def handle_qa_answer_submit(params: dict) -> dict:
          if note_failed else '')
         + (f'<p style="margin:0 0 12px 0;padding:8px 12px;background:#fef2f2;border:1px solid #fca5a5;border-radius:6px;color:#b91c1c;font-weight:700;">{fail_banner}</p>'
          if pipeline_write_failed else '')
+        + (f'<p style="margin:0 0 12px 0;padding:8px 12px;background:#fef2f2;border:1px solid #fca5a5;border-radius:6px;color:#b91c1c;font-weight:700;">{lc_fail_line}</p>'
+         if lc_fail_line else '')
         + f'<h2 style="margin:0 0 4px 0;font-size:18px;color:#111;">{deal_name}</h2>'
         f'<p style="margin:0 0 14px 0;color:#4b5563;font-size:14px;">Seller answered the buyer Q&amp;A (deal {deal_id}).</p>'
         '<table style="border-collapse:collapse;width:100%;margin-bottom:14px;font-size:13px;">'
@@ -4224,6 +4310,7 @@ def handle_qa_answer_submit(params: dict) -> dict:
     chad_plain = (
         (f"{note_warn}\n" if note_failed else "")
         + (f"{fail_banner}\n\n" if pipeline_write_failed else ("\n" if note_failed else ""))
+        + (f"{lc_fail_line}\n\n" if lc_fail_line else "")
         + f"Seller answered the buyer Q&A on {deal_name} (deal {deal_id}).\n\n"
         f"Buyer: {buyer_name or '—'} <{buyer_email or '—'}>\nSeller: <{seller_email or '—'}>\n\n"
         + "\n".join(priv_lines) + "\n\n" + upd_plain + f"Deal: {deal_link}\nPipeline: {pipeline_link}"
