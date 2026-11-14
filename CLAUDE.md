@@ -22,6 +22,13 @@
 - IAM: needs `s3:GetObject` + `s3:PutObject` on `arn:aws:s3:::full-pipeline-cache/visibility-overrides.json`
   (`s3:ListBucket` on the bucket too, so a missing file reads as NoSuchKey rather than AccessDenied).
 
+## HMAC_SECRET rotation
+- `HMAC_SECRET` (env, no fallback) signs unsubscribe / Q&A answer links and verifies those plus deal and New Order
+  tokens (alongside `FORM_HMAC_SECRET`). Empty -> nothing is signed with it and nothing it covers is accepted.
+- `HMAC_SECRET_OLD` (optional, empty = off) is never used to sign. A token matching only it is "legacy": accepted
+  for unsubscribe only; deal form/writes, New Order and Q&A answers show `LINK_EXPIRED_MSG` (`bad_link_msg`).
+- Tests: `tests/test_hmac_rotation.py`.
+
 ## SECURITY RULES — MANDATORY (read before any change)
 
 This repo is PUBLIC, and so are its GitHub Actions logs. Secrets have leaked from Chad's repos 5-6 times. Never again.

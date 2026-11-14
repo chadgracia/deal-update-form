@@ -4,6 +4,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+os.environ.setdefault("HMAC_SECRET", "test-hmac-key")  # fake key; the code has no fallback
 import lambda_function as lf
 
 F = lf.LAST_CONFIRMED_FIELD

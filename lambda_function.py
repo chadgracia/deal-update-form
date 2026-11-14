@@ -29,7 +29,15 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-HMAC_SECRET         = os.environ.get("HMAC_SECRET", "change-me-in-env")
+HMAC_SECRET         = os.environ.get("HMAC_SECRET", "")
+# Previous HMAC_SECRET while it is being rotated (optional, empty = off). A token
+# that matches ONLY this key is "legacy": here it is accepted for unsubscribe
+# only; every other action refuses it with LINK_EXPIRED_MSG. Never used to sign.
+HMAC_SECRET_OLD     = os.environ.get("HMAC_SECRET_OLD", "")
+LINK_EXPIRED_MSG    = ("This link has expired. Please use the link in our most recent email, "
+                       "or reply to that email and we will help.")
+if not HMAC_SECRET:
+    logger.error("HMAC_SECRET is not set: HMAC_SECRET links are neither signed nor accepted.")
 # Dedicated key for DEAL-link tokens (?deal_id=X&token=Y): every update-form
 # link generator (syndicate-dash, portfolio-deploy, deal-nudge, stale deal
 # scanner) signs with it, as do New Order person tokens (old HMAC_SECRET
@@ -252,9 +260,11 @@ def get_jwt():
 
 
 def make_token(id_value: int) -> str:
-    msg = str(id_value).encode()
-    sig = hmac.new(HMAC_SECRET.encode(), msg, hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(sig).decode().rstrip("=")
+    """HMAC_SECRET token (unsubscribe, Q&A answer links). Empty HMAC_SECRET ->
+    "" (never signs with an empty key; such a link never verifies)."""
+    if not HMAC_SECRET:
+        return ""
+    return _sign(HMAC_SECRET, id_value)
 
 
 def _sign(secret: str, id_value) -> str:
@@ -262,28 +272,43 @@ def _sign(secret: str, id_value) -> str:
     return base64.urlsafe_b64encode(sig).decode().rstrip("=")
 
 
+def _matches(secret: str, id_value, token: str) -> bool:
+    """True only for a non-empty key and token that match."""
+    return bool(secret) and bool(token) and hmac.compare_digest(_sign(secret, id_value), token)
+
+
+def is_legacy_token(id_value, token: str) -> bool:
+    """Token signed with HMAC_SECRET_OLD and NOT the current HMAC_SECRET.
+    Off when either key is empty."""
+    token = token or ""
+    return (bool(HMAC_SECRET) and _matches(HMAC_SECRET_OLD, id_value, token)
+            and not _matches(HMAC_SECRET, id_value, token))
+
+
 def make_deal_token(deal_id) -> str:
     """Deal-link token: signed with FORM_HMAC_SECRET (falls back to
-    HMAC_SECRET only if FORM_HMAC_SECRET is not configured)."""
-    return _sign(FORM_HMAC_SECRET or HMAC_SECRET, deal_id)
+    HMAC_SECRET only if FORM_HMAC_SECRET is not configured; "" if neither is)."""
+    key = FORM_HMAC_SECRET or HMAC_SECRET
+    return _sign(key, deal_id) if key else ""
 
 
 def verify_deal_token(deal_id, token: str) -> bool:
-    """Key-rotation release 1: accepts a deal token signed with EITHER the
-    new FORM_HMAC_SECRET or the previous HMAC_SECRET, for every action, so
-    no link breaks while the generators switch keys. (Release 2 will limit
-    the previous key to viewing/editing for a 14-day grace window and never
-    for Hold or Cancel.)"""
+    """Accepts a deal token signed with FORM_HMAC_SECRET or the current
+    HMAC_SECRET. A legacy (HMAC_SECRET_OLD) token is refused: deal writes never
+    take one (callers show LINK_EXPIRED_MSG via is_legacy_token)."""
     token = token or ""
-    if FORM_HMAC_SECRET and hmac.compare_digest(_sign(FORM_HMAC_SECRET, deal_id), token):
-        return True
-    return hmac.compare_digest(_sign(HMAC_SECRET, deal_id), token)
+    return _matches(FORM_HMAC_SECRET, deal_id, token) or _matches(HMAC_SECRET, deal_id, token)
 
 
 def verify_token(id_value: int, token: str) -> bool:
-    expected = hmac.new(HMAC_SECRET.encode(), str(id_value).encode(), hashlib.sha256).digest()
-    expected_b64 = base64.urlsafe_b64encode(expected).decode().rstrip("=")
-    return hmac.compare_digest(expected_b64, token)
+    """Current HMAC_SECRET only (fail closed when it is empty)."""
+    return _matches(HMAC_SECRET, id_value, token or "")
+
+
+def bad_link_msg(id_value, token: str, default: str) -> str:
+    """Error text for a token that failed verification: the expired-link text
+    when it is a legacy token, else the caller's usual message."""
+    return LINK_EXPIRED_MSG if is_legacy_token(id_value, token) else default
 
 
 def make_new_token(pid, sso_email: str = "") -> str:
@@ -292,19 +317,19 @@ def make_new_token(pid, sso_email: str = "") -> str:
     ("new-sso:{pid}:{email}") so the POST knows how they arrived."""
     if sso_email:
         return _sign(FORM_HMAC_SECRET, f"new-sso:{pid}:{sso_email.lower()}")
-    return _sign(FORM_HMAC_SECRET or HMAC_SECRET, f"new:{pid}")
+    key = FORM_HMAC_SECRET or HMAC_SECRET
+    return _sign(key, f"new:{pid}") if key else ""
 
 
 def verify_new_token(pid, token: str, sso_email: str = "") -> bool:
-    """Token links: FORM_HMAC_SECRET or the old HMAC_SECRET (emailed links keep
-    working). Signed-in tokens were only ever minted with FORM_HMAC_SECRET."""
+    """Token links: FORM_HMAC_SECRET or the current HMAC_SECRET. A legacy
+    (HMAC_SECRET_OLD) token never creates an order. Signed-in tokens were only
+    ever minted with FORM_HMAC_SECRET."""
     token = token or ""
     if sso_email:
         return bool(FORM_HMAC_SECRET) and hmac.compare_digest(
             _sign(FORM_HMAC_SECRET, f"new-sso:{pid}:{sso_email.lower()}"), token)
-    if FORM_HMAC_SECRET and hmac.compare_digest(_sign(FORM_HMAC_SECRET, f"new:{pid}"), token):
-        return True
-    return hmac.compare_digest(_sign(HMAC_SECRET, f"new:{pid}"), token)
+    return _matches(FORM_HMAC_SECRET, f"new:{pid}", token) or _matches(HMAC_SECRET, f"new:{pid}", token)
 
 
 def _get_cookie(event, name):
@@ -2515,7 +2540,8 @@ def handle_get(params: dict, event: dict = None) -> dict:
             pid = int(person_id)
         except (ValueError, TypeError):
             return error_page("Invalid unsubscribe link.")
-        if not verify_token(pid, token):
+        # Unsubscribe also takes a legacy (HMAC_SECRET_OLD) token.
+        if not (verify_token(pid, token) or is_legacy_token(pid, token)):
             return error_page("Invalid or expired link.")
         person_url = f"https://app.pipelinecrm.com/people/{pid}"
         send_email(
@@ -2546,7 +2572,7 @@ def handle_get(params: dict, event: dict = None) -> dict:
             except (ValueError, TypeError):
                 return error_page("Invalid link.")
             if not verify_new_token(pid, token):
-                return error_page("Invalid or expired link.")
+                return error_page(bad_link_msg(f"new:{pid}", token, "Invalid or expired link."))
             jwt = get_jwt()
             p_result = call_pipeline_api("GET", f"/people/{pid}.json", jwt=jwt)
             if p_result["status"] != 200 or not isinstance(p_result["data"], dict):
@@ -2582,7 +2608,7 @@ def handle_get(params: dict, event: dict = None) -> dict:
     except (ValueError, TypeError):
         return error_page("Invalid deal link.")
     if not verify_deal_token(deal_id, token):
-        return error_page("Invalid or expired link.")
+        return error_page(bad_link_msg(deal_id, token, "Invalid or expired link."))
 
     jwt    = get_jwt()
     result = call_pipeline_api("GET", f"/deals/{deal_id}.json", jwt=jwt)
@@ -2683,7 +2709,8 @@ def handle_new_order_create(params: dict, event: dict = None) -> dict:
     # Identity: the token binds the person (and, for sign-ins, the gg_id email).
     sso_email = params.get("new_email", "").strip().lower()
     if not verify_new_token(new_pid, params.get("new_token", ""), sso_email):
-        return error_page("Invalid or expired link.")
+        return error_page(bad_link_msg(f"new:{new_pid}", params.get("new_token", ""),
+                                       "Invalid or expired link."))
     arrival = f"Signed in on trades ({sso_email})" if sso_email else "Emailed token link"
 
     side = params.get("side", "").strip().lower()
@@ -2922,7 +2949,7 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
     # active, cancel) needs the signed deal-link token -- deal IDs are public.
     # It rides in the form's query string and in a hidden field.
     if not verify_deal_token(deal_id, params.get("token", "")):
-        return error_page("Invalid or expired link.")
+        return error_page(bad_link_msg(deal_id, params.get("token", ""), "Invalid or expired link."))
 
     jwt = get_jwt()
 
@@ -2951,7 +2978,7 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
         # "Still active — no changes": POST only (handle_post), signed link
         # token required; writes only LAST_CONFIRMED_FIELD = today.
         if not verify_deal_token(deal_id, params.get("token", "")):
-            return error_page("Invalid or expired link.")
+            return error_page(bad_link_msg(deal_id, params.get("token", ""), "Invalid or expired link."))
         result = call_pipeline_api("PUT", f"/deals/{deal_id}.json",
                                    {"deal": {"custom_fields": {LAST_CONFIRMED_FIELD: confirmed_today()}}}, jwt=jwt)
         write_ok = result["status"] == 200
@@ -2982,7 +3009,7 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
         # success email Chad. Requires the signed link token (it rides in
         # the form's own query string) since this write is destructive.
         if not verify_deal_token(deal_id, params.get("token", "")):
-            return error_page("Invalid or expired link.")
+            return error_page(bad_link_msg(deal_id, params.get("token", ""), "Invalid or expired link."))
         deal_url = f"https://app.pipelinecrm.com/deals/{deal_id}"
         result = call_pipeline_api("PUT", f"/deals/{deal_id}.json",
                                    {"deal": {"deal_stage_id": OBSOLETE_STAGE_ID}}, jwt=jwt)
@@ -4078,7 +4105,7 @@ def handle_qa_answer_submit(params: dict) -> dict:
     token   = params.get("token", "")
 
     if not (deal_id and set_id and token) or not verify_token(set_id, token):
-        return error_page("This link is invalid or has expired.")
+        return error_page(bad_link_msg(set_id, token, "This link is invalid or has expired."))
 
     s3 = boto3.client("s3", region_name="us-east-1")
     try:
@@ -4442,7 +4469,7 @@ def handle_qa_answer_page(qs: dict) -> dict:
     token   = qs.get("token", "")
 
     if not (deal_id and set_id and token) or not verify_token(set_id, token):
-        return error_page("This link is invalid or has expired.")
+        return error_page(bad_link_msg(set_id, token, "This link is invalid or has expired."))
 
     try:
         obj = boto3.client("s3", region_name="us-east-1").get_object(
