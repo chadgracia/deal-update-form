@@ -10,6 +10,18 @@
 - IAM: this Lambda's execution role needs `s3:PutObject` on `arn:aws:s3:::full-pipeline-cache/deal-fresh/*`.
   Without it every write logs `deal-fresh: ... AccessDenied` and nothing else changes.
 
+## Visibility (sell deals) + visibility-overrides.json
+- `VISIBILITY_FIELD` (`custom_label_4013323`): `VIS_ALL` 7223456 / `VIS_INTERESTED` 7223457 / `VIS_PRIVATE` 7223458;
+  blank/unknown = All. "Who can see this deal?" radios on the New Order page and update form, SELL only; written in the
+  same Pipeline write as the other fields. Buy deals never get the control or the field. An update POST without the
+  `visibility` field (old cached page) leaves the field untouched. Posted values other than the three ids = `VIS_ALL`.
+- After each successful sell create / update save, `write_visibility_override` read-modify-writes
+  `s3://full-pipeline-cache/visibility-overrides.json` = `{"<deal_id>": {"v": <id>, "at": <UTC ISO>}}`, dropping entries
+  older than 3 h. This Lambda is its ONLY writer; readers apply it over deals.json. Best effort: one `visibility-overrides:`
+  log line on failure; a failed read (other than NoSuchKey) writes nothing.
+- IAM: needs `s3:GetObject` + `s3:PutObject` on `arn:aws:s3:::full-pipeline-cache/visibility-overrides.json`
+  (`s3:ListBucket` on the bucket too, so a missing file reads as NoSuchKey rather than AccessDenied).
+
 ## SECURITY RULES — MANDATORY (read before any change)
 
 This repo is PUBLIC, and so are its GitHub Actions logs. Secrets have leaked from Chad's repos 5-6 times. Never again.

@@ -158,6 +158,14 @@ CP_DIRECT_YES_ID  = 5080984
 REVENUE_TYPE_COMMISSION_ID = 1027   # Pipeline native revenue_type_id for "Commission"
 DEADLINE_FIELD    = "custom_label_4006402"
 LAST_CONFIRMED_FIELD = "custom_label_4012491"  # date: last time the client confirmed the deal is live (write YYYY-MM-DD)
+# Visibility (sell deals): dropdown; blank/unknown = All investors.
+VISIBILITY_FIELD = "custom_label_4013323"
+VIS_ALL = 7223456          # "All Investors"
+VIS_INTERESTED = 7223457   # "Interested investors only"
+VIS_PRIVATE = 7223458      # "Private"
+VIS_LABELS = {VIS_ALL: "All investors", VIS_INTERESTED: "Interested investors only", VIS_PRIVATE: "Private"}
+VISIBILITY_OVERRIDES_KEY = "visibility-overrides.json"   # in full-pipeline-cache; this Lambda is its only writer
+VISIBILITY_OVERRIDE_MAX_AGE = timedelta(hours=3)
 SELLER_FEE_FIELD  = "custom_label_3940560"
 EST_VAL_FIELD     = "custom_label_4009563"  # stored in billions, like COMPANY_VAL_FIELD
 SERIES_FIELD      = "custom_label_3064333"
@@ -549,6 +557,72 @@ def publish_fresh_deal(deal_id, jwt):
         )
     except Exception as e:
         print(f"deal-fresh: failed for deal {deal_id}: {e}")
+
+
+def normalize_visibility(v) -> int:
+    """Pipeline/posted Visibility value -> one of the three option ids; anything else -> VIS_ALL."""
+    try:
+        if isinstance(v, (list, tuple)):
+            v = v[0] if len(v) == 1 else None
+        if v is None or isinstance(v, bool) or str(v).strip() == "":
+            return VIS_ALL
+        n = int(float(str(v).strip()))
+    except (ValueError, TypeError, OverflowError):
+        return VIS_ALL
+    return n if n in VIS_LABELS else VIS_ALL
+
+
+def visibility_radios_html(current: int, company: str, company_span_id: str = "") -> str:
+    """'Who can see this deal?' radio group (sell side). company '' -> 'this company'."""
+    co = html.escape(company) if company else "this company"
+    if company_span_id:
+        co = f'<span id="{company_span_id}">{co}</span>'
+    sub = '<span style="display:inline-block;font-size:12px;color:#888;margin:2px 0 0 22px;">{}</span>'
+    opts = [
+        (VIS_ALL, "All investors", ""),
+        (VIS_INTERESTED, f"Only investors already interested in {co}",
+         sub.format("Alerted only to buyers already following this company. Not in the newsletter or listings.")),
+        (VIS_PRIVATE, "Private", sub.format("Not shown or sent to anyone.")),
+    ]
+    radios = "".join(
+        f'<label style="font-weight:normal;display:block;"><input type="radio" name="visibility" value="{vid}"'
+        f'{" checked" if vid == current else ""}> {label}{"<br>" + sl if sl else ""}</label>'
+        for vid, label, sl in opts)
+    return ('<label>Who can see this deal?</label>'
+            f'<div style="display:flex;flex-direction:column;gap:10px;margin-top:6px;">{radios}</div>')
+
+
+def write_visibility_override(deal_id, vis):
+    """Read-modify-write s3://full-pipeline-cache/visibility-overrides.json with
+    {deal_id: {"v": vis, "at": now}}, dropping entries older than 3 hours.
+    Best effort: one log line on failure, never raises. A failed read (other
+    than a missing file) writes nothing, so other deals' entries are never lost."""
+    try:
+        s3 = boto3.client("s3")
+        try:
+            data = json.loads(s3.get_object(Bucket="full-pipeline-cache", Key=VISIBILITY_OVERRIDES_KEY)["Body"].read())
+        except Exception as e:
+            if (getattr(e, "response", None) or {}).get("Error", {}).get("Code") not in ("NoSuchKey", "404"):
+                raise
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        now = _utcnow()
+        kept = {}
+        for k, rec in data.items():
+            try:
+                at = datetime.fromisoformat(str(rec["at"]).replace("Z", "+00:00"))
+                if at.tzinfo is None:
+                    at = at.replace(tzinfo=timezone.utc)
+                if now - at <= VISIBILITY_OVERRIDE_MAX_AGE:
+                    kept[k] = rec
+            except Exception:
+                pass
+        kept[str(deal_id)] = {"v": int(vis), "at": now.isoformat()}
+        s3.put_object(Bucket="full-pipeline-cache", Key=VISIBILITY_OVERRIDES_KEY,
+                      ContentType="application/json", Body=json.dumps(kept))
+    except Exception as e:
+        print(f"visibility-overrides: write failed for deal {deal_id}: {type(e).__name__}: {e}")
 
 
 def confirmed_today() -> str:
@@ -1955,6 +2029,11 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
 
     summary_current = (deal.get("summary") or "").strip()
     summary_display = summary_current if summary_current else "No public notes on file yet."
+    visibility_html = ""
+    if sell:
+        _vis_src = (posted["visibility"] if posted and "visibility" in posted
+                    else (deal.get("custom_fields") or {}).get(VISIBILITY_FIELD))
+        visibility_html = f'<div class="field">{visibility_radios_html(normalize_visibility(_vis_src), company)}</div>'
     form_html = f"""
     <h1>{side} Order: {company}</h1>
     <p class="subtitle">Hello{f" {contact_name.split()[0]}" if contact_name else ""}! Please review and update your deal details below.</p>
@@ -2015,6 +2094,8 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
       </div>
 
       {spv_fields_html}{ref_bottom_html}
+
+      {visibility_html}
 
       <div class="btn-row">
         <button type="submit" name="submit_action" value="confirm" class="btn-primary">✓ Confirm / Update</button>
@@ -2279,6 +2360,10 @@ def render_new_order_page(pid: int, first_name: str, token: str, sso_email: str 
         <label id="attest-sell" style="font-weight:normal;display:block;margin-top:6px;"><input type="checkbox" name="attest_sell" value="1"> {html.escape(ATTEST_TEXT["sell"])}</label>
       </div>
 
+      <div class="field" id="vis-wrap">
+        {visibility_radios_html(VIS_ALL, "", company_span_id="vis-co")}
+      </div>
+
       <div class="actions">
         <button type="submit" name="submit_action" value="create" class="btn-primary">Continue →</button>
       </div>
@@ -2308,6 +2393,14 @@ def render_new_order_page(pid: int, first_name: str, token: str, sso_email: str 
         var other = (f.company_id.value === 'other'), box = document.getElementById('co-other');
         box.style.display = other ? '' : 'none';
         box.querySelector('input').required = other;
+        // Visibility: sell only; its company label follows the chosen company.
+        var vis = document.getElementById('vis-wrap'), visOn = (side === 'sell');
+        vis.style.display = visOn ? '' : 'none';
+        vis.querySelectorAll('input').forEach(function(i) {{ i.disabled = !visOn; }});
+        var coName = '';
+        if (other) coName = box.querySelector('input').value.trim();
+        else if (f.company_id.value && f.company_id.selectedIndex >= 0) coName = f.company_id.options[f.company_id.selectedIndex].text;
+        document.getElementById('vis-co').textContent = coName || 'this company';
       }}
       f.addEventListener('change', sync);
       sync();
@@ -2538,7 +2631,7 @@ def form_links(deal: dict):
 def _new_order_repost_form(params: dict, side: str, overrides: dict, label: str, primary: bool = True) -> str:
     """One-button form that re-POSTs the original New Order fields with overrides."""
     keys = ["new_person_id", "new_token", "new_email", "side", "structure", f"attest_{side}",
-            "company_id", "company_other", "confirm_other", "confirm_new"]
+            "company_id", "company_other", "confirm_other", "confirm_new", "visibility"]
     vals = {k: params.get(k, "") for k in keys}
     vals.update(overrides)
     hidden = "".join(f'<input type="hidden" name="{k}" value="{html.escape(str(v), quote=True)}">'
@@ -2668,6 +2761,9 @@ def handle_new_order_create(params: dict, event: dict = None) -> dict:
                           NEXUS_FIELD: [NEXUS_DIRECT_ID], CP_DIRECT_FIELD: [CP_DIRECT_YES_ID],
                           LAST_CONFIRMED_FIELD: confirmed_today()},
     }
+    new_vis = normalize_visibility(params.get("visibility", "")) if side == "sell" else None
+    if new_vis is not None:
+        deal_body["custom_fields"][VISIBILITY_FIELD] = new_vis
     if new_cid:
         deal_body["company_id"] = new_cid
     if new_owner_id:
@@ -2686,6 +2782,8 @@ def handle_new_order_create(params: dict, event: dict = None) -> dict:
         return error_page("Sorry — we could not create your order. Please reply to our email and we will set it up for you.")
     new_deal_id = created["id"]
     publish_fresh_deal(new_deal_id, jwt_new)
+    if new_vis is not None:
+        write_visibility_override(new_deal_id, new_vis)
 
     try:
         s3_lock.put_object(
@@ -2727,8 +2825,10 @@ def handle_new_order_create(params: dict, event: dict = None) -> dict:
         ("Company", company_line),
         ("Person", f"{new_person_name} — {new_person_email}"),
         ("Arrived via", arrival),
-        ("Deal", f"#{new_deal_id} ({new_stage_label}): {new_deal_url}"),
     ]
+    if new_vis is not None and new_vis != VIS_ALL:
+        facts.append(("Visibility", VIS_LABELS[new_vis]))
+    facts.append(("Deal", f"#{new_deal_id} ({new_stage_label}): {new_deal_url}"))
     alerts, notes = [], [f"Attestation checked {attested_at}"]
     if not attest_saved:
         alerts.append(f"Attestation record NOT saved to s3://{QA_BUCKET}/attestations/{new_deal_id}.json")
@@ -3067,6 +3167,11 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
 
     # Build Pipeline update payload
     custom = {REFRESH_FIELD: 60}
+    # Visibility: sell deals only, and only when the form posted the control
+    # (an old cached page without it leaves the field untouched).
+    new_vis = normalize_visibility(params.get("visibility", "")) if (sell and "visibility" in params) else None
+    if new_vis is not None:
+        custom[VISIBILITY_FIELD] = new_vis
     if structure_override:
         custom[STRUCTURE_FIELD] = [STRUCTURE_KEY_IDS[structure_override]]
     if net_val:
@@ -3169,6 +3274,9 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
         )
         return error_page("We couldn't save your update right now. Chad has been notified.")
     publish_fresh_deal(deal_id, jwt)
+    if new_vis is not None:
+        write_visibility_override(deal_id, new_vis)
+    vis_line = f"Visibility: {VIS_LABELS[new_vis]}" if new_vis not in (None, VIS_ALL) else ""
 
     # Confirm the stale sell gross actually cleared; never blocks the seller.
     # Pipeline returns the cleared value as the string "0.0".
@@ -3422,6 +3530,8 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
         email_lines += ["", structure_mismatch_line]
     if anthropic_hold:
         email_lines += ["", ANTHROPIC_SELL_LINE]
+    if vis_line:
+        email_lines += ["", vis_line]
     if comments:
         email_lines += ["", f"Client note (may need a public-notes update): {comments}"]
     email_lines += ["", "Refresh reset to 60 days."]
@@ -3506,6 +3616,11 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
         comments_html += (
             '<p style="margin:16px 0 0 0;font-size:13px;color:#b91c1c;font-weight:600;">'
             f'{ANTHROPIC_SELL_LINE}</p>'
+        )
+    if vis_line:
+        comments_html += (
+            '<p style="margin:16px 0 0 0;font-size:13px;color:#b45309;font-weight:600;">'
+            f'{html.escape(vis_line)}</p>'
         )
     if comments:
         comments_html += (
