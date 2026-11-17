@@ -153,6 +153,11 @@ GROSS_CLEAR_FAIL_MSG = "Gross price did NOT clear — clear manually in Pipeline
 GROSS_CLEAR_UNVERIFIED_MSG = "Gross clear could not be verified (Pipeline read failed) — check deal in Pipeline"
 MIN_SIZE_FIELD    = "custom_label_3065488"
 MAX_SIZE_FIELD    = "custom_label_3064645"
+MIN_TRANSACTION_SIZE = 100000
+SIZE_PER_SHARE_MSG = ("Minimum and Maximum Size are the total dollar amount of the transaction, not the price "
+                      "per share, and our minimum transaction size is $100,000 (enter 100000). Put the price "
+                      "per share in the price field above.")
+SIZE_ORDER_MSG = "Minimum Size cannot be larger than Maximum Size."
 MGMT_FEE_FIELD    = "custom_label_3940558"
 CARRY_FIELD       = "custom_label_3940559"
 LAYERS_FIELD      = "custom_label_3938743"
@@ -1160,6 +1165,40 @@ def html_response(body_html: str, status: int = 200, head_extra: str = "") -> di
 
 
 PRICE_OR_VAL_MSG = "Enter either a net price or an estimated valuation."
+
+# Live hint under the Min/Max transaction size inputs. Plain string (not an
+# f-string): single braces.
+SIZE_HINT_JS = r"""
+    <script>
+    (function() {
+      function hint(name) {
+        var inp = document.querySelector('[name="' + name + '"]');
+        var out = document.getElementById(name + '_hint');
+        if (!inp || !out) return;
+        function upd() {
+          var raw = (inp.value || '').replace(/[$,\s]/g, '');
+          if (!raw) { out.textContent = ''; return; }
+          var n = Number(raw);
+          if (!isFinite(n)) { out.style.color = '#b91c1c'; out.textContent = 'Enter a number, e.g. 100000.'; return; }
+          var dollars = '$' + n.toLocaleString('en-US', {maximumFractionDigits: 2});
+          if (n < 1000) {
+            out.style.color = '#b91c1c';
+            out.textContent = dollars + ' \u2014 This looks like a price per share. Enter the total dollar amount.';
+          } else if (n < 100000) {
+            out.style.color = '#b91c1c';
+            out.textContent = dollars + ' \u2014 Our minimum transaction size is $100,000.';
+          } else {
+            out.style.color = '#666';
+            out.textContent = dollars;
+          }
+        }
+        inp.addEventListener('input', upd);
+        upd();
+      }
+      hint('min_size');
+      hint('max_size');
+    })();
+    </script>"""
 ROUND_VAL_MSG = "Enter the round valuation (pre-money), e.g. 150M or 1.5B."
 VAL_OR_UNKNOWN_MSG = "Enter the estimated valuation, or tick Unknown."
 VAL_SHORTHAND_HINT = "Shorthand works &mdash; type 15B or 250M and we&rsquo;ll convert it."
@@ -1234,8 +1273,8 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
 
     gross_val    = fmt_input(parse_cf(cf, GROSS_FIELD))
     net_val      = fmt_input(parse_cf(cf, NET_FIELD))
-    min_val      = fmt_thousands(parse_cf(cf, MIN_SIZE_FIELD))
-    max_val      = fmt_thousands(parse_cf(cf, MAX_SIZE_FIELD))
+    min_val      = html.escape(fmt_thousands(parse_cf(cf, MIN_SIZE_FIELD)), quote=True)
+    max_val      = html.escape(fmt_thousands(parse_cf(cf, MAX_SIZE_FIELD)), quote=True)
     mgmt_fee_val = fmt_input(parse_cf(cf, MGMT_FEE_FIELD))
     carry_val    = fmt_input(parse_cf(cf, CARRY_FIELD))
     layers_raw   = parse_cf(cf, LAYERS_FIELD)
@@ -2097,15 +2136,18 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
 
       <div class="field-row" style="margin-bottom:20px">
         <div class="field" style="margin-bottom:0">
-          <label>Minimum Size ($) <span style="color:#b91c1c">*</span></label>
+          <label>Minimum Transaction Size (total $) <span style="color:#b91c1c">*</span></label>
           <input type="text" inputmode="numeric" name="min_size" value="{min_val}" step="1" placeholder="e.g. 100000" required>
+          <p id="min_size_hint" style="font-size:12px;font-weight:600;margin:4px 0 0 0;"></p>
           <p style="font-size:12px;color:#888;margin:4px 0 0 0;">Buyers searching below this amount won't see your deal.</p>
         </div>
         <div class="field" style="margin-bottom:0">
-          <label>Maximum Size ($) <span style="color:#b91c1c">*</span></label>
-          <input type="text" inputmode="numeric" name="max_size" value="{max_val}" step="1" placeholder="e.g. 10000000" required>
+          <label>Maximum Transaction Size (total $) <span style="color:#b91c1c">*</span></label>
+          <input type="text" inputmode="numeric" name="max_size" value="{max_val}" step="1" placeholder="e.g. 1000000" required>
+          <p id="max_size_hint" style="font-size:12px;font-weight:600;margin:4px 0 0 0;"></p>
         </div>
       </div>
+      <p style="font-size:12px;color:#888;margin:-14px 0 20px 0;">Total dollar amount of the transaction, not the price per share. Minimum $100,000.</p>
 
       <div class="field">
         <label>Current Public Notes</label>
@@ -2140,7 +2182,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
     </p>
     {modal_html}
     {price_or_val_script}{series_script}
-    {popup_script}
+    {popup_script}{SIZE_HINT_JS}
     """
     return html_response(form_html)
 
@@ -3068,8 +3110,8 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
     net_val      = params.get("net", "").strip()
     share_val    = params.get("share_count", "").strip().replace(",", "")
     share_class_val = params.get("share_class", "").strip()
-    min_val      = params.get("min_size", "").strip().replace(",", "")
-    max_val      = params.get("max_size", "").strip().replace(",", "")
+    min_val      = params.get("min_size", "").strip().replace(",", "").replace("$", "").replace(" ", "")
+    max_val      = params.get("max_size", "").strip().replace(",", "").replace("$", "").replace(" ", "")
     mgmt_fee_val = params.get("mgmt_fee", "").strip()
     carry_val    = params.get("carry", "").strip()
     layers_val   = params.get("layers", "").strip()
@@ -3113,6 +3155,40 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
         structure_override = ""
     if structure_override:
         structure = [STRUCTURE_KEY_IDS[structure_override]]
+
+    # Transaction size check (confirm only): sizes are total dollars, never a
+    # per-share price. Rejects before any Pipeline write; entries are kept.
+    if submit_action == "confirm" and (min_val or max_val):
+        size_err = None
+        sizes = {}
+        for _k, _v in (("min", min_val), ("max", max_val)):
+            if not _v:
+                continue
+            try:
+                _n = float(_v)
+            except ValueError:
+                _n = None
+            if _n is None or _n != _n or _n in (float("inf"), float("-inf")) or _n < MIN_TRANSACTION_SIZE:
+                size_err = SIZE_PER_SHARE_MSG
+                break
+            sizes[_k] = _n
+        if not size_err:
+            _price_raw = net_val if sell else gross_val
+            try:
+                _price = float(_price_raw) if _price_raw else None
+            except ValueError:
+                _price = None
+            if _price is not None and any(abs(_n - _price) < 0.0001 for _n in sizes.values()):
+                size_err = SIZE_PER_SHARE_MSG
+            elif "min" in sizes and "max" in sizes and sizes["min"] > sizes["max"]:
+                size_err = SIZE_ORDER_MSG
+        if size_err:
+            logger.info(f"Deal {deal_id}: transaction size rule failed; nothing written")
+            unsub_url, new_url = form_links(current_deal)
+            resp = render_form(current_deal, company_rec, unsub_url, load_all_deals(), new_url,
+                               form_error=size_err, posted=params, structure_override=structure_override)
+            resp["statusCode"] = 400
+            return resp
 
     # SPV detection (mirrors render_form logic)
     submit_is_spv = False
@@ -3790,6 +3866,8 @@ def qa_answers_to_custom(answers):
             field = {"max_ticket": MAX_SIZE_FIELD, "min_ticket": MIN_SIZE_FIELD,
                      "shares_avail": SHARE_COUNT_FIELD}[qid]
             val = _pos(raw)
+            if qid != "shares_avail" and val is not None and val < MIN_TRANSACTION_SIZE:
+                val = None
         elif qid == "est_valuation":
             field = EST_VAL_FIELD
             num = parse_qa_valuation_billions(raw)
