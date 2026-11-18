@@ -10,7 +10,7 @@ import lambda_function as lf
 
 DEAL = {"id": 9, "name": "Kraken: Sell", "custom_fields": {}, "company": {"id": 5, "name": "Kraken"},
         "primary_contact": {"id": 7, "full_name": "Client"}, "deal_stage": {"name": "Inquiry"}}
-CONFIRM = "deal_id=9&submit_action=confirm&net_price=30&min_size=100000&max_size=500000&comments=hi"
+CONFIRM = "deal_id=9&submit_action=confirm&net_price=30&min_size=250000&max_size=500000&comments=hi"
 
 
 class DealTokenRequired(unittest.TestCase):

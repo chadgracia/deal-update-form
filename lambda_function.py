@@ -153,10 +153,12 @@ GROSS_CLEAR_FAIL_MSG = "Gross price did NOT clear — clear manually in Pipeline
 GROSS_CLEAR_UNVERIFIED_MSG = "Gross clear could not be verified (Pipeline read failed) — check deal in Pipeline"
 MIN_SIZE_FIELD    = "custom_label_3065488"
 MAX_SIZE_FIELD    = "custom_label_3064645"
-MIN_TRANSACTION_SIZE = 100000
+MIN_TRANSACTION_SIZE = 250000
 SIZE_PER_SHARE_MSG = ("Minimum and Maximum Size are the total dollar amount of the transaction, not the price "
-                      "per share, and our minimum transaction size is $100,000 (enter 100000). Put the price "
-                      "per share in the price field above.")
+                      "per share. Put the price per share in the price field above.")
+MIN_SIZE_MSG = ("Our minimum transaction size is $250,000 (enter 250000). "
+                "If your transaction is smaller than that, we are not able "
+                "to act on it at this time.")
 SIZE_ORDER_MSG = "Minimum Size cannot be larger than Maximum Size."
 MGMT_FEE_FIELD    = "custom_label_3940558"
 CARRY_FIELD       = "custom_label_3940559"
@@ -1179,14 +1181,14 @@ SIZE_HINT_JS = r"""
           var raw = (inp.value || '').replace(/[$,\s]/g, '');
           if (!raw) { out.textContent = ''; return; }
           var n = Number(raw);
-          if (!isFinite(n)) { out.style.color = '#b91c1c'; out.textContent = 'Enter a number, e.g. 100000.'; return; }
+          if (!isFinite(n)) { out.style.color = '#b91c1c'; out.textContent = 'Enter a number, e.g. 250000.'; return; }
           var dollars = '$' + n.toLocaleString('en-US', {maximumFractionDigits: 2});
           if (n < 1000) {
             out.style.color = '#b91c1c';
             out.textContent = dollars + ' \u2014 This looks like a price per share. Enter the total dollar amount.';
-          } else if (n < 100000) {
+          } else if (n < 250000) {
             out.style.color = '#b91c1c';
-            out.textContent = dollars + ' \u2014 Our minimum transaction size is $100,000.';
+            out.textContent = dollars + ' \u2014 Our minimum transaction size is $250,000.';
           } else {
             out.style.color = '#666';
             out.textContent = dollars;
@@ -2137,7 +2139,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
       <div class="field-row" style="margin-bottom:20px">
         <div class="field" style="margin-bottom:0">
           <label>Minimum Transaction Size (total $) <span style="color:#b91c1c">*</span></label>
-          <input type="text" inputmode="numeric" name="min_size" value="{min_val}" step="1" placeholder="e.g. 100000" required>
+          <input type="text" inputmode="numeric" name="min_size" value="{min_val}" step="1" placeholder="e.g. 250000" required>
           <p id="min_size_hint" style="font-size:12px;font-weight:600;margin:4px 0 0 0;"></p>
           <p style="font-size:12px;color:#888;margin:4px 0 0 0;">Buyers searching below this amount won't see your deal.</p>
         </div>
@@ -2147,7 +2149,7 @@ def render_form(deal: dict, company_rec: dict, unsub_url: str, all_deals: list =
           <p id="max_size_hint" style="font-size:12px;font-weight:600;margin:4px 0 0 0;"></p>
         </div>
       </div>
-      <p style="font-size:12px;color:#888;margin:-14px 0 20px 0;">Total dollar amount of the transaction, not the price per share. Minimum $100,000.</p>
+      <p style="font-size:12px;color:#888;margin:-14px 0 20px 0;">Total dollar amount of the transaction, not the price per share. Minimum $250,000.</p>
 
       <div class="field">
         <label>Current Public Notes</label>
@@ -3168,8 +3170,11 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
                 _n = float(_v)
             except ValueError:
                 _n = None
-            if _n is None or _n != _n or _n in (float("inf"), float("-inf")) or _n < MIN_TRANSACTION_SIZE:
+            if _n is None or _n != _n or _n in (float("inf"), float("-inf")):
                 size_err = SIZE_PER_SHARE_MSG
+                break
+            if _n < MIN_TRANSACTION_SIZE:
+                size_err = MIN_SIZE_MSG
                 break
             sizes[_k] = _n
         if not size_err:

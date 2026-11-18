@@ -59,26 +59,35 @@ class SubmitSizeTests(unittest.TestCase):
         self._rejected(self._post("abc", "200000"), "not the price per share")
 
     def test_below_minimum(self):
-        self._rejected(self._post("50000", "200000"), "our minimum transaction size is $100,000")
+        self._rejected(self._post("50000", "300000"), lf.MIN_SIZE_MSG)
         self.calls.clear()
-        self._rejected(self._post("", "99999"), "our minimum transaction size is $100,000")
+        self._rejected(self._post("", "249999"), lf.MIN_SIZE_MSG)
+
+    def test_below_minimum_not_per_share_message(self):
+        r = self._post("100000", "300000")
+        self._rejected(r, lf.MIN_SIZE_MSG)
+        self.assertNotIn(lf.SIZE_PER_SHARE_MSG, r["body"])
+
+    def test_at_minimum_accepted(self):
+        self._post("250000", "250000")
+        self.assertEqual(len([c for c in self.calls if c[0] == "PUT"]), 1)
 
     def test_min_greater_than_max(self):
-        self._rejected(self._post("500000", "200000"), lf.SIZE_ORDER_MSG)
+        self._rejected(self._post("500000", "300000"), lf.SIZE_ORDER_MSG)
 
     def test_equals_price(self):
-        self._rejected(self._post("150000", "200000", price="net=150000"), "not the price per share")
+        self._rejected(self._post("300000", "400000", price="net=300000"), lf.SIZE_PER_SHARE_MSG)
         self.deal = _deal(sell=False)
         self.calls.clear()
-        self._rejected(self._post("100000", "250000", price="gross=250000"), "not the price per share")
+        self._rejected(self._post("250000", "400000", price="gross=400000"), lf.SIZE_PER_SHARE_MSG)
 
     def test_dollar_sign_accepted(self):
-        r = self._post("%24100%2C000", "%24+250%2C000")
+        r = self._post("%24250%2C000", "%24+300%2C000")
         puts = [c for c in self.calls if c[0] == "PUT"]
         self.assertEqual(len(puts), 1, r.get("body", "")[:300])
         cf = puts[0][2]["deal"]["custom_fields"]
-        self.assertEqual(cf[lf.MIN_SIZE_FIELD], 100000.0)
-        self.assertEqual(cf[lf.MAX_SIZE_FIELD], 250000.0)
+        self.assertEqual(cf[lf.MIN_SIZE_FIELD], 250000.0)
+        self.assertEqual(cf[lf.MAX_SIZE_FIELD], 300000.0)
 
     def test_hold_and_cancel_and_still_active_unaffected(self):
         for action in ("hold", "still_active"):
@@ -98,10 +107,10 @@ class QaSizeTests(unittest.TestCase):
 
     def test_small_size_skipped(self):
         self.assertEqual(self.m("max_ticket", "45"), ({}, [("max_ticket", "45")]))
-        self.assertEqual(self.m("min_ticket", "99,999"), ({}, [("min_ticket", "99,999")]))
+        self.assertEqual(self.m("min_ticket", "249,999"), ({}, [("min_ticket", "249,999")]))
 
     def test_ok_size_written(self):
-        self.assertEqual(self.m("min_ticket", "$100,000")[0], {lf.MIN_SIZE_FIELD: 100000.0})
+        self.assertEqual(self.m("min_ticket", "$250,000")[0], {lf.MIN_SIZE_FIELD: 250000.0})
 
     def test_shares_avail_unchanged(self):
         self.assertEqual(self.m("shares_avail", "45")[0], {lf.SHARE_COUNT_FIELD: 45.0})
@@ -111,9 +120,9 @@ class FormRenderTests(unittest.TestCase):
     def test_labels_and_hint(self):
         body = lf.render_form(_deal(), {}, "?u", [], "")["body"]
         for s in ("Minimum Transaction Size (total $)", "Maximum Transaction Size (total $)",
-                  'placeholder="e.g. 1000000"', "Total dollar amount of the transaction, not the price per share. Minimum $100,000.",
+                  'placeholder="e.g. 1000000"', "Total dollar amount of the transaction, not the price per share. Minimum $250,000.",
                   'id="min_size_hint"', 'id="max_size_hint"', "This looks like a price per share. Enter the total dollar amount.",
-                  "Our minimum transaction size is $100,000."):
+                  "Our minimum transaction size is $250,000.", 'placeholder="e.g. 250000"'):
             self.assertIn(s, body)
 
 

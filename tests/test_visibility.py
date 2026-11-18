@@ -133,7 +133,7 @@ class UpdateSaveTests(unittest.TestCase):
         return {"status": 200, "data": {"id": 9}}
 
     def _save(self, extra=""):
-        body = "deal_id=9&submit_action=confirm&net=10&share_count=100&share_class=5077831&min_size=100000&max_size=200000" + extra
+        body = "deal_id=9&submit_action=confirm&net=10&share_count=100&share_class=5077831&min_size=250000&max_size=500000" + extra
         return lf.handle_post(body, {"token": lf.make_deal_token(9)})
 
     def _put_cf(self):
@@ -163,7 +163,7 @@ class UpdateSaveTests(unittest.TestCase):
 
     def test_buy_deal_ignores_field(self):
         self.deal = _deal(sell=False)
-        body = "deal_id=9&submit_action=confirm&gross=10&share_count=100&share_class=5077831&min_size=100000&max_size=200000&visibility=7223458"
+        body = "deal_id=9&submit_action=confirm&gross=10&share_count=100&share_class=5077831&min_size=250000&max_size=500000&visibility=7223458"
         lf.handle_post(body, {"token": lf.make_deal_token(9)})
         self.assertNotIn(V, self._put_cf())
         self.ovr.assert_not_called()
