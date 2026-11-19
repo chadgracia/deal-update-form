@@ -2897,7 +2897,7 @@ def handle_new_order_create(params: dict, event: dict = None) -> dict:
         ("Person", f"{new_person_name} — {new_person_email}"),
         ("Arrived via", arrival),
     ]
-    if new_vis is not None and new_vis != VIS_ALL:
+    if new_vis is not None:
         facts.append(("Visibility", VIS_LABELS[new_vis]))
     facts.append(("Deal", f"#{new_deal_id} ({new_stage_label}): {new_deal_url}"))
     alerts, notes = [], [f"Attestation checked {attested_at}"]
@@ -3384,7 +3384,13 @@ def handle_post(body_str: str, qs: dict = None, event: dict = None) -> dict:
     publish_fresh_deal(deal_id, jwt)
     if new_vis is not None:
         write_visibility_override(deal_id, new_vis)
-    vis_line = f"Visibility: {VIS_LABELS[new_vis]}" if new_vis not in (None, VIS_ALL) else ""
+    # Sell deals always show Visibility in Chad's email; without the posted control
+    # (old cached page) show the stored Pipeline value, blank = All investors.
+    if sell:
+        shown_vis = new_vis if new_vis is not None else normalize_visibility(parse_cf(current_cf, VISIBILITY_FIELD))
+        vis_line = f"Visibility: {VIS_LABELS[shown_vis]}"
+    else:
+        vis_line = ""
 
     # Confirm the stale sell gross actually cleared; never blocks the seller.
     # Pipeline returns the cleared value as the string "0.0".

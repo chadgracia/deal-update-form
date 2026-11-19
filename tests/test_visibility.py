@@ -151,15 +151,24 @@ class UpdateSaveTests(unittest.TestCase):
             self.assertEqual(cf[lf.LAST_CONFIRMED_FIELD], "2026-11-14")
             self.ovr.assert_called_once_with(9, want)
             text = self.email.call_args.args[2]
-            if want == lf.VIS_ALL:
-                self.assertNotIn("Visibility:", text)
-            else:
-                self.assertIn(f"Visibility: {lf.VIS_LABELS[want]}", text)
+            self.assertEqual(text.count("Visibility:"), 1)
+            self.assertIn(f"Visibility: {lf.VIS_LABELS[want]}", text)
+            self.assertIn(f"Visibility: {lf.VIS_LABELS[want]}", self.email.call_args.kwargs["html"])
 
     def test_missing_field_leaves_untouched(self):
         self._save()
         self.assertNotIn(V, self._put_cf())
         self.ovr.assert_not_called()
+
+    def test_missing_field_email_shows_stored_value(self):
+        for stored, want in ((None, lf.VIS_ALL), ("", lf.VIS_ALL), ([lf.VIS_PRIVATE], lf.VIS_PRIVATE),
+                             (lf.VIS_INTERESTED, lf.VIS_INTERESTED), (lf.VIS_ALL, lf.VIS_ALL)):
+            self.calls.clear(); self.email.reset_mock()
+            self.deal = _deal(vis=stored)
+            self._save()
+            self.assertNotIn(V, self._put_cf())
+            self.assertIn(f"Visibility: {lf.VIS_LABELS[want]}", self.email.call_args.args[2])
+            self.assertIn(f"Visibility: {lf.VIS_LABELS[want]}", self.email.call_args.kwargs["html"])
 
     def test_buy_deal_ignores_field(self):
         self.deal = _deal(sell=False)
@@ -167,6 +176,8 @@ class UpdateSaveTests(unittest.TestCase):
         lf.handle_post(body, {"token": lf.make_deal_token(9)})
         self.assertNotIn(V, self._put_cf())
         self.ovr.assert_not_called()
+        self.assertNotIn("Visibility", self.email.call_args.args[2])
+        self.assertNotIn("Visibility", self.email.call_args.kwargs["html"])
 
     def test_failed_put_writes_no_override(self):
         self._api_orig = self._api
@@ -231,11 +242,8 @@ class NewOrderCreateTests(unittest.TestCase):
             self.publish_fresh_deal.assert_called_once_with(77, "jwt")
             self.write_visibility_override.assert_called_once_with(77, want)
             text = self.send_email.call_args.args[2]
-            if want == lf.VIS_ALL:
-                self.assertNotIn("Visibility:", text)
-            else:
-                self.assertIn(f"Visibility: {lf.VIS_LABELS[want]}", text)
-                self.assertIn(f"Visibility</td>", self.send_email.call_args.kwargs["html"])
+            self.assertIn(f"Visibility: {lf.VIS_LABELS[want]}", text)
+            self.assertIn(f"Visibility</td>", self.send_email.call_args.kwargs["html"])
 
     def test_buy_untouched(self):
         cf = self._create(side="buy", vis="7223458")
