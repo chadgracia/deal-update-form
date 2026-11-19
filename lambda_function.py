@@ -572,6 +572,55 @@ def call_pipeline_api(method, endpoint, payload=None, jwt=None):
         return {"status": 500, "data": str(e)}
 
 
+NEXUS_OK_LINE   = "Nexus: Direct \u00b7 CP Direct?: Yes \u00b7 Revenue Type: Commission"
+NEXUS_FAIL_LINE = "Nexus / CP Direct? NOT set, fix in Pipeline"
+
+
+def _single_select_is(value, want):
+    """True when a single-select value equals want: int, numeric string, or one-item list."""
+    if isinstance(value, list):
+        if len(value) != 1:
+            return False
+        value = value[0]
+    try:
+        return int(str(value).strip()) == want
+    except (ValueError, TypeError):
+        return False
+
+
+def _nexus_cp_ok(deal):
+    cf = (deal or {}).get("custom_fields") if isinstance(deal, dict) else None
+    if not isinstance(cf, dict):
+        return False
+    return (_single_select_is(cf.get(NEXUS_FIELD), NEXUS_DIRECT_ID)
+            and _single_select_is(cf.get(CP_DIRECT_FIELD), CP_DIRECT_YES_ID))
+
+
+def ensure_nexus_cp_direct(deal_id, created, jwt):
+    """New Order self-check: if the create response does not show Nexus = Direct and
+    CP Direct? = Yes, PUT them once. Returns True when they are confirmed set.
+    Best effort: never raises, never changes the client's response."""
+    try:
+        if _nexus_cp_ok(created):
+            return True
+        cf = created.get("custom_fields") if isinstance(created, dict) else None
+        cf = cf if isinstance(cf, dict) else {}
+        before = (cf.get(NEXUS_FIELD), cf.get(CP_DIRECT_FIELD))
+        res = call_pipeline_api("PUT", f"/deals/{deal_id}.json",
+                                {"deal": {"custom_fields": {NEXUS_FIELD: NEXUS_DIRECT_ID,
+                                                            CP_DIRECT_FIELD: CP_DIRECT_YES_ID}}}, jwt=jwt)
+        data = res.get("data") if isinstance(res.get("data"), dict) else {}
+        acf = data.get("custom_fields") if isinstance(data.get("custom_fields"), dict) else {}
+        after = (acf.get(NEXUS_FIELD), acf.get(CP_DIRECT_FIELD))
+        ok = res.get("status") in (200, 201) and _nexus_cp_ok(data)
+        logger.error(f"nexus-check: deal {deal_id} create left Nexus/CP Direct? = {before}; "
+                     f"PUT {res.get('status')} -> {after} ({'fixed' if ok else 'STILL NOT SET'})")
+        return ok
+    except Exception as e:
+        logger.error(f"nexus-check: deal {deal_id} self-check failed: {e}")
+        return False
+
+
 def publish_fresh_deal(deal_id, jwt):
     """Write the just-updated deal to s3://full-pipeline-cache/deal-fresh/{id}.json so Blockbook
     (syndicate-dash) can overlay it before the hourly deals.json snapshot catches up.
@@ -2829,7 +2878,7 @@ def handle_new_order_create(params: dict, event: dict = None) -> dict:
         "deal_stage_id": HOLD_STAGE_ID if anthropic_hold else INQUIRY_STAGE_ID,
         "revenue_type_id": REVENUE_TYPE_COMMISSION_ID,
         "custom_fields": {DEAL_TYPE_FIELD: [new_type_id], STRUCTURE_FIELD: structure_ids,
-                          NEXUS_FIELD: [NEXUS_DIRECT_ID], CP_DIRECT_FIELD: [CP_DIRECT_YES_ID],
+                          NEXUS_FIELD: NEXUS_DIRECT_ID, CP_DIRECT_FIELD: CP_DIRECT_YES_ID,
                           LAST_CONFIRMED_FIELD: confirmed_today()},
     }
     new_vis = normalize_visibility(params.get("visibility", "")) if side == "sell" else None
@@ -2852,6 +2901,7 @@ def handle_new_order_create(params: dict, event: dict = None) -> dict:
         logger.error(f"new-order create failed: {create_result}")
         return error_page("Sorry — we could not create your order. Please reply to our email and we will set it up for you.")
     new_deal_id = created["id"]
+    nexus_ok = ensure_nexus_cp_direct(new_deal_id, created, jwt_new)
     publish_fresh_deal(new_deal_id, jwt_new)
     if new_vis is not None:
         write_visibility_override(new_deal_id, new_vis)
@@ -2901,6 +2951,10 @@ def handle_new_order_create(params: dict, event: dict = None) -> dict:
         facts.append(("Visibility", VIS_LABELS[new_vis]))
     facts.append(("Deal", f"#{new_deal_id} ({new_stage_label}): {new_deal_url}"))
     alerts, notes = [], [f"Attestation checked {attested_at}"]
+    if nexus_ok:
+        notes.insert(0, NEXUS_OK_LINE)
+    else:
+        alerts.append(NEXUS_FAIL_LINE)
     if not attest_saved:
         alerts.append(f"Attestation record NOT saved to s3://{QA_BUCKET}/attestations/{new_deal_id}.json")
     if anthropic_hold:

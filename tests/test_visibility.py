@@ -237,7 +237,8 @@ class NewOrderCreateTests(unittest.TestCase):
                 m.reset_mock()
             cf = self._create(vis=posted)
             self.assertEqual(cf[V], want)
-            self.assertEqual(cf[lf.NEXUS_FIELD], [lf.NEXUS_DIRECT_ID])
+            self.assertEqual(cf[lf.NEXUS_FIELD], lf.NEXUS_DIRECT_ID)
+            self.assertEqual(cf[lf.CP_DIRECT_FIELD], lf.CP_DIRECT_YES_ID)
             self.assertEqual(cf[lf.LAST_CONFIRMED_FIELD], "2026-11-14")
             self.publish_fresh_deal.assert_called_once_with(77, "jwt")
             self.write_visibility_override.assert_called_once_with(77, want)
@@ -254,6 +255,87 @@ class NewOrderCreateTests(unittest.TestCase):
     def test_repost_forms_carry_visibility(self):
         html_out = lf._new_order_repost_form({"visibility": "7223458", "side": "sell"}, "sell", {}, "Go")
         self.assertIn('name="visibility" value="7223458"', html_out)
+
+
+class NexusSelfCheckTest(unittest.TestCase):
+    """New Order self-check: PUT Nexus / CP Direct? once when the create response lacks them."""
+
+    def setUp(self):
+        self.calls = []
+        self.create_cf = {}
+        self.put_status = 200
+        for name, val in (("get_jwt", "jwt"), ("confirmed_today", "2026-11-14"), ("new_order_lock_age", None),
+                          ("open_orders_for", []), ("verify_new_token", True)):
+            p = mock.patch.object(lf, name, return_value=val)
+            p.start(); self.addCleanup(p.stop)
+        for name in ("send_email", "publish_fresh_deal", "write_visibility_override"):
+            p = mock.patch.object(lf, name)
+            setattr(self, name, p.start()); self.addCleanup(p.stop)
+        p = mock.patch.object(lf.boto3, "client", return_value=mock.Mock())
+        p.start(); self.addCleanup(p.stop)
+        p = mock.patch.object(lf, "call_pipeline_api", side_effect=self._api)
+        p.start(); self.addCleanup(p.stop)
+
+    def _api(self, method, endpoint, payload=None, jwt=None):
+        self.calls.append((method, endpoint, payload))
+        if endpoint.startswith("/people/"):
+            return {"status": 200, "data": {"id": 4, "first_name": "Pat", "email": "p@example.com"}}
+        if endpoint.startswith("/companies/"):
+            return {"status": 200, "data": {"id": 3, "name": "Kraken"}}
+        if method == "PUT":
+            if self.put_status == "boom":
+                raise RuntimeError("network")
+            return {"status": self.put_status,
+                    "data": {"id": 77, "custom_fields": {lf.NEXUS_FIELD: lf.NEXUS_DIRECT_ID,
+                                                         lf.CP_DIRECT_FIELD: lf.CP_DIRECT_YES_ID}}}
+        return {"status": 201, "data": {"id": 77, "custom_fields": self.create_cf}}
+
+    def _run(self):
+        params = {"submit_action": "create", "new_person_id": "4", "new_token": "t", "side": "buy",
+                  "structure": next(iter(lf.NEW_ORDER_STRUCTURES["buy"])), "attest_buy": "1", "company_id": "3"}
+        r = lf.handle_new_order_create(params)
+        self.assertEqual(r["statusCode"], 302)
+        self.assertIn("deal_id=77", r["headers"]["Location"])
+        return [c for c in self.calls if c[0] == "PUT"]
+
+    def test_create_ok_no_put(self):
+        for n, c in ((lf.NEXUS_DIRECT_ID, lf.CP_DIRECT_YES_ID), ("6460632", "5080984"), ([6460632], ["5080984"])):
+            self.calls.clear()
+            self.create_cf = {lf.NEXUS_FIELD: n, lf.CP_DIRECT_FIELD: c}
+            self.assertEqual(self._run(), [])
+            self.assertIn(lf.NEXUS_OK_LINE, self.send_email.call_args.args[2])
+
+    def test_missing_triggers_one_put(self):
+        self.create_cf = {lf.NEXUS_FIELD: None, lf.CP_DIRECT_FIELD: [lf.CP_DIRECT_YES_ID]}
+        with self.assertLogs(level="ERROR") as logs:
+            puts = self._run()
+        self.assertEqual(len(puts), 1)
+        self.assertEqual(puts[0][1], "/deals/77.json")
+        self.assertEqual(puts[0][2], {"deal": {"custom_fields": {lf.NEXUS_FIELD: lf.NEXUS_DIRECT_ID,
+                                                                 lf.CP_DIRECT_FIELD: lf.CP_DIRECT_YES_ID}}})
+        self.assertTrue(any("nexus-check" in m and "fixed" in m for m in logs.output))
+        text = self.send_email.call_args.args[2]
+        self.assertIn(lf.NEXUS_OK_LINE, text)
+        self.assertNotIn(lf.NEXUS_FAIL_LINE, text)
+
+    def test_put_fails_red_alert(self):
+        for bad in (500, "boom"):
+            self.calls.clear()
+            self.put_status = bad
+            with self.assertLogs(level="ERROR"):
+                puts = self._run()
+            self.assertEqual(len(puts), 1)
+            text = self.send_email.call_args.args[2]
+            self.assertIn(lf.NEXUS_FAIL_LINE, text)
+            self.assertNotIn(lf.NEXUS_OK_LINE, text)
+            self.assertIn("#b91c1c", self.send_email.call_args.kwargs["html"])
+
+    def test_single_select_is(self):
+        self.assertTrue(lf._single_select_is(5, 5))
+        self.assertTrue(lf._single_select_is(" 5", 5))
+        self.assertTrue(lf._single_select_is(["5"], 5))
+        for v in (None, "", [], [5, 5], "x", 6, {"id": 5}):
+            self.assertFalse(lf._single_select_is(v, 5))
 
 
 if __name__ == "__main__":
